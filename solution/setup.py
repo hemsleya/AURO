@@ -45,6 +45,7 @@ setup(
     description='TODO: Package description',
     license='TODO: License declaration',
     tests_require=['pytest'],
+    num_robots=1,
     entry_points={
         'console_scripts': [
             'robot_controller = solution.robot_controller:main',
