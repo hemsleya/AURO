@@ -1,17 +1,3 @@
-#
-# Copyright (c) 2024 University of York and others
-#
-# This program and the accompanying materials are made available under the
-# terms of the Eclipse Public License 2.0 which is available at
-# http://www.eclipse.org/legal/epl-2.0.
-# 
-# SPDX-License-Identifier: EPL-2.0
-#
-# Contributors:
-#   * Alan Millard - initial contributor
-#   * Pedro Ribeiro - revised implementation
-#
- 
 import sys
 
 import rclpy
@@ -25,8 +11,9 @@ from std_msgs.msg import Float32
 from geometry_msgs.msg import Twist, Pose
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
-from auro_interfaces.msg import StringWithPose, Item, ItemList
+from assessment_interfaces.msg import Item, ItemList
 from auro_interfaces.srv import ItemRequest
+
 
 from tf_transformations import euler_from_quaternion
 import angles
@@ -68,7 +55,7 @@ class RobotController(Node):
         self.initial_y = self.get_parameter('y').get_parameter_value().double_value
         self.initial_yaw = self.get_parameter('yaw').get_parameter_value().double_value
 
-        # Class variables used to store persistent values between executions of callbacks and control loop
+         # Class variables used to store persistent values between executions of callbacks and control loop
         self.state = State.FORWARD # Current FSM state
         self.pose = Pose() # Current pose (position and orientation), relative to the odom reference frame
         self.previous_pose = Pose() # Store a snapshot of the pose for comparison against future poses
@@ -81,7 +68,8 @@ class RobotController(Node):
         self.items = ItemList()
 
         self.declare_parameter('robot_id', 'robot1')
-        self.robot_id = self.get_parameter('robot_id').value
+        self.robot_id = self.get_namespace().replace('/', '').strip()
+        self.get_logger().info(f"Robot ID: {self.robot_id}")
 
         # Here we use two callback groups, to ensure that those in 'client_callback_group' can be executed
         # independently from those in 'timer_callback_group'. This allos calling the services below within
@@ -95,7 +83,7 @@ class RobotController(Node):
 
         self.item_subscriber = self.create_subscription(
             ItemList,
-            self.robot_id+'/items',
+            'items',
             self.item_callback,
             10, callback_group=timer_callback_group
         )
@@ -145,25 +133,78 @@ class RobotController(Node):
         #
         # http://docs.ros.org/en/noetic/api/visualization_msgs/html/msg/Marker.html
         # http://wiki.ros.org/rviz/DisplayTypes/Marker
-        self.marker_publisher = self.create_publisher(StringWithPose, 'marker_input', 10, callback_group=timer_callback_group)
 
         # Creates a timer that calls the control_loop method repeatedly - each loop represents single iteration of the FSM
         self.timer_period = 0.1 # 100 milliseconds = 10 Hz
         self.timer = self.create_timer(self.timer_period, self.control_loop, callback_group=timer_callback_group)
+    
+    def item_callback(self, msg):
+        self.get_logger().info(f"Received items: {msg}")
+        self.items = msg
+        visible_items = ', '.join([item.colour for item in self.items.data])
+        self.get_logger().info(f"Visible items: {visible_items}")
 
+    # Called every time odom_subscriber receives an Odometry message from the /odom topic
+    #
+    # The Gazebo ROS differential drive plugin generates these messages using kinematic equations, and publishes them
+    # https://github.com/ros-simulation/gazebo_ros_pkgs/blob/ros2/gazebo_plugins/src/gazebo_ros_diff_drive.cpp#L434-L535
+    #
+    # This plugin is configured with physical measurements of the TurtleBot3 in the SDF file that defines the robot model
+    # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/blob/humble-devel/turtlebot3_gazebo/models/turtlebot3_waffle_pi/model.sdf#L476-L507
+    #
+    # The pose estimates are expressed in a coordinate system relative to the starting pose of the robot
+    def odom_callback(self, msg):
+        self.pose = msg.pose.pose # Store the pose in a class variable
+
+        # Uses tf_transformations package to convert orientation from quaternion to Euler angles (RPY = roll, pitch, yaw)
+        # https://github.com/DLu/tf_transformations
+        #
+        # Roll (rotation around X axis) and pitch (rotation around Y axis) are discarded
+        (roll, pitch, yaw) = euler_from_quaternion([self.pose.orientation.x,
+                                                    self.pose.orientation.y,
+                                                    self.pose.orientation.z,
+                                                    self.pose.orientation.w])
+        
+        
+        self.yaw = yaw # Store the yaw in a class variable
+
+    # Called every time scan_subscriber recieves a LaserScan message from the /scan topic
+    #
+    # The Gazebo RaySensor calculates distance at which rays intersect with obstacles
+    # The data is published by the Gazebo ROS ray sensor plugin
+    # https://github.com/gazebosim/gazebo-classic/tree/gazebo11/gazebo/sensors
+    # https://github.com/ros-simulation/gazebo_ros_pkgs/blob/ros2/gazebo_plugins/src/gazebo_ros_ray_sensor.cpp#L178-L205
+    #
+    # This plugin is configured to match the LiDAR on the TurtleBot3 in the SDF file that defines the robot model
+    # http://wiki.ros.org/hls_lfcd_lds_driver
+    # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/blob/humble-devel/turtlebot3_gazebo/models/turtlebot3_waffle_pi/model.sdf#L132-L165
+    def scan_callback(self, msg):
+        # Group scan ranges into 4 segments
+        # Front, left, and right segments are each 60 degrees
+        # Back segment is 180 degrees
+        front_ranges = msg.ranges[331:359] + msg.ranges[0:30] # 30 to 331 degrees (30 to -30 degrees)
+        left_ranges  = msg.ranges[31:90] # 31 to 90 degrees (31 to 90 degrees)
+        back_ranges  = msg.ranges[91:270] # 91 to 270 degrees (91 to -90 degrees)
+        right_ranges = msg.ranges[271:330] # 271 to 330 degrees (-30 to -91 degrees)
+
+        # Store True/False values for each sensor segment, based on whether the nearest detected obstacle is closer than SCAN_THRESHOLD
+        self.scan_triggered[SCAN_FRONT] = min(front_ranges) < SCAN_THRESHOLD 
+        self.scan_triggered[SCAN_LEFT]  = min(left_ranges)  < SCAN_THRESHOLD
+        self.scan_triggered[SCAN_BACK]  = min(back_ranges)  < SCAN_THRESHOLD
+        self.scan_triggered[SCAN_RIGHT] = min(right_ranges) < SCAN_THRESHOLD
+
+
+    # Control loop for the FSM - called periodically by self.timer
     def control_loop(self):
 
-        # Send message to rviz_text_marker node
-        marker_input = StringWithPose()
-        marker_input.text = str(self.state) # Visualise robot state as an RViz marker
-        marker_input.pose = self.pose # Set the pose of the RViz marker to track the robot's pose
-        self.marker_publisher.publish(marker_input)
 
-        self.get_logger().info(f"{self.state}")
+        #self.get_logger().info(f"{self.state}")
         
         match self.state:
 
             case State.FORWARD:
+                visible_items = ', '.join([item.colour for item in self.items.data])
+                self.get_logger().info(f"Visible items: {visible_items}")
 
                 if self.scan_triggered[SCAN_FRONT]:
                     self.previous_yaw = self.yaw
@@ -269,7 +310,8 @@ class RobotController(Node):
 
             case _:
                 pass
-        
+
+
     def destroy_node(self):
         msg = Twist()
         self.cmd_vel_publisher.publish(msg)
@@ -283,11 +325,8 @@ def main(args=None):
 
     node = RobotController()
 
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
-
     try:
-        executor.spin()
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     except ExternalShutdownException:
