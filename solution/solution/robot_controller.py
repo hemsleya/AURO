@@ -1,337 +1,315 @@
+# Based on: https://github.com/ros-planning/navigation2/blob/humble/nav2_simple_commander/nav2_simple_commander/example_nav_to_pose.py
+
 import sys
+import math
+import random
 
 import rclpy
 from rclpy.node import Node
-from rclpy.signals import SignalHandlerOptions
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
-from rclpy.qos import QoSPresetProfiles
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.duration import Duration
 
-from std_msgs.msg import Float32
-from geometry_msgs.msg import Twist, Pose
+from geometry_msgs.msg import PoseStamped, Point, Twist
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import LaserScan
-from assessment_interfaces.msg import Item, ItemList
-from auro_interfaces.srv import ItemRequest
+from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 
-from tf_transformations import euler_from_quaternion
+from tf_transformations import euler_from_quaternion, quaternion_from_euler
 import angles
 
 from enum import Enum
-import random
-import math
 
-LINEAR_VELOCITY  = 0.3 # Metres per second
-ANGULAR_VELOCITY = 0.5 # Radians per second
-
-TURN_LEFT = 1 # Postive angular velocity turns left
-TURN_RIGHT = -1 # Negative angular velocity turns right
-
-SCAN_THRESHOLD = 0.5 # Metres per second
- # Array indexes for sensor sectors
-SCAN_FRONT = 0
-SCAN_LEFT = 1
-SCAN_BACK = 2
-SCAN_RIGHT = 3
-
-# Finite state machine (FSM) states
 class State(Enum):
-    FORWARD = 0
-    TURNING = 1
-    COLLECTING = 2
+    SET_GOAL = 0
+    NAVIGATING = 1
+    SPINNING = 2
+    BACKUP = 3
+    COLLECTING = 4
+    OFFLOADING = 5
 
-
-class RobotController(Node):
+class AutonomousNavigation(Node):
 
     def __init__(self):
-        super().__init__('robot_controller')
+        super().__init__('autonomous_navigation_multithreaded')
+
+        self.state = State.SET_GOAL
+
+        subscriber_callback_group = MutuallyExclusiveCallbackGroup()
+        publisher_callback_group = MutuallyExclusiveCallbackGroup()
+        timer_callback_group = MutuallyExclusiveCallbackGroup()
+
+        self.odom_subscriber = self.create_subscription(
+            Odometry,
+            'odom',
+            self.odom_callback,
+            10,
+            callback_group=subscriber_callback_group)
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self.declare_parameter('x', 0.0)
         self.declare_parameter('y', 0.0)
         self.declare_parameter('yaw', 0.0)
 
-        self.initial_x = self.get_parameter('x').get_parameter_value().double_value
-        self.initial_y = self.get_parameter('y').get_parameter_value().double_value
-        self.initial_yaw = self.get_parameter('yaw').get_parameter_value().double_value
-
-         # Class variables used to store persistent values between executions of callbacks and control loop
-        self.state = State.FORWARD # Current FSM state
-        self.pose = Pose() # Current pose (position and orientation), relative to the odom reference frame
-        self.previous_pose = Pose() # Store a snapshot of the pose for comparison against future poses
-        self.yaw = 0.0 # Angle the robot is facing (rotation around the Z axis, in radians), relative to the odom reference frame
-        self.previous_yaw = 0.0 # Snapshot of the angle for comparison against future angles
-        self.turn_angle = 0.0 # Relative angle to turn to in the TURNING state
-        self.turn_direction = TURN_LEFT # Direction to turn in the TURNING state
-        self.goal_distance = random.uniform(1.0, 2.0) # Goal distance to travel in FORWARD state
-        self.scan_triggered = [False] * 4 # Boolean value for each of the 4 LiDAR sensor sectors. True if obstacle detected within SCAN_THRESHOLD
-        self.items = ItemList()
-
-        self.declare_parameter('robot_id', 'robot1')
-        self.robot_id = self.get_namespace().replace('/', '').strip()
-        self.get_logger().info(f"Robot ID: {self.robot_id}")
-
-        # Here we use two callback groups, to ensure that those in 'client_callback_group' can be executed
-        # independently from those in 'timer_callback_group'. This allos calling the services below within
-        # a callback handled by the timer_callback_group. See https://docs.ros.org/en/humble/How-To-Guides/Using-callback-groups.html
-        # for a detailed discussion on the ROS executors and callback groups.
-        client_callback_group = MutuallyExclusiveCallbackGroup()
-        timer_callback_group = MutuallyExclusiveCallbackGroup()
-
-        self.pick_up_service = self.create_client(ItemRequest, '/pick_up_item', callback_group=client_callback_group)
-        self.offload_service = self.create_client(ItemRequest, '/offload_item', callback_group=client_callback_group)
-
-        self.item_subscriber = self.create_subscription(
-            ItemList,
-            'items',
-            self.item_callback,
-            10, callback_group=timer_callback_group
-        )
-
-        # Subscribes to Odometry messages published on /odom topic
-        # http://docs.ros.org/en/noetic/api/nav_msgs/html/msg/Odometry.html
-        #
-        # Final argument can either be an integer representing the history depth, or a Quality of Service (QoS) profile
-        # https://docs.ros.org/en/humble/Concepts/Intermediate/About-Quality-of-Service-Settings.html
-        # https://github.com/ros2/rclpy/blob/humble/rclpy/rclpy/node.py#L1335-L1338
-        # https://github.com/ros2/rclpy/blob/humble/rclpy/rclpy/node.py#L1187-L1196
-        #
-        # If you only specify a history depth, rclpy defaults to QoSHistoryPolicy.KEEP_LAST
-        # https://github.com/ros2/rclpy/blob/humble/rclpy/rclpy/qos.py#L80-L83
-        self.odom_subscriber = self.create_subscription(
-            Odometry,
-            'odom',
-            self.odom_callback,
-            10, callback_group=timer_callback_group)
+        self.x = self.get_parameter('x').value
+        self.y = self.get_parameter('y').value
+        self.distance = 0.0
+        self.angle = self.get_parameter('yaw').value
         
-        # Subscribes to LaserScan messages on the /scan topic
-        # http://docs.ros.org/en/noetic/api/sensor_msgs/html/msg/LaserScan.html
-        #
-        # QoSPresetProfiles.SENSOR_DATA specifices "best effort" reliability and a small queue size
-        # https://docs.ros.org/en/humble/Concepts/Intermediate/About-Quality-of-Service-Settings.html
-        # https://github.com/ros2/rclpy/blob/humble/rclpy/rclpy/qos.py#L455
-        # https://github.com/ros2/rclpy/blob/humble/rclpy/rclpy/qos.py#L428-L431
-        self.scan_subscriber = self.create_subscription(
-            LaserScan,
-            'scan',
-            self.scan_callback,
-            QoSPresetProfiles.SENSOR_DATA.value, callback_group=timer_callback_group)
+        self.get_logger().info(f"Initial pose: ({self.x:.2f}, {self.y:.2f}), {self.angle:.2f} degrees")
 
-        # Publishes Twist messages (linear and angular velocities) on the /cmd_vel topic
-        # http://docs.ros.org/en/noetic/api/geometry_msgs/html/msg/Twist.html
-        # 
-        # Gazebo ROS differential drive plugin subscribes to these messages, and converts them into left and right wheel speeds
-        # https://github.com/ros-simulation/gazebo_ros_pkgs/blob/ros2/gazebo_plugins/src/gazebo_ros_diff_drive.cpp#L537-L555
-        self.cmd_vel_publisher = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.current_goal = 0
+        self.potential_goals = []
 
-        #self.orientation_publisher = self.create_publisher(Float32, '/orientation', 10)
+        self.potential_goals.append(Point(x = 0.0, y = 0.0))
 
-        # Publishes custom StringWithPose (see auro_interfaces/msg/StringWithPose.msg) messages on the /marker_input topic
-        # The week3/rviz_text_marker node subscribes to these messages, and ouputs a Marker message on the /marker_output topic
-        # ros2 run week_3 rviz_text_marker
-        # This can be visualised in RViz: Add > By topic > /marker_output
-        #
-        # http://docs.ros.org/en/noetic/api/visualization_msgs/html/msg/Marker.html
-        # http://wiki.ros.org/rviz/DisplayTypes/Marker
+        self.potential_goals.append(Point(x = 2.57, y = 2.5))
+        self.potential_goals.append(Point(x = 2.57, y = -2.46))
+        self.potential_goals.append(Point(x = -3.42, y =  2.5))
+        self.potential_goals.append(Point(x = -3.42, y =  -2.46))
 
-        # Creates a timer that calls the control_loop method repeatedly - each loop represents single iteration of the FSM
+        self.navigator = BasicNavigator()
+        
+        self.robot_id = self.get_namespace().replace('/', '')
+        self.get_logger().info(f"Robot ID: {self.get_namespace()}")
+
+        initial_pose = PoseStamped()
+        initial_pose.pose.position.x = self.x
+        initial_pose.pose.position.y = self.y
+        initial_pose.pose.orientation.z = 0.0
+        initial_pose.pose.orientation.w = self.angle
+        self.get_logger().info(f"Initial Pose: {initial_pose}")
+        initial_pose.header.frame_id = 'map'
+        initial_pose.header.stamp = self.get_clock().now().to_msg()
+
+        (initial_pose.pose.orientation.x,
+         initial_pose.pose.orientation.y,
+         initial_pose.pose.orientation.z,
+         initial_pose.pose.orientation.w) = quaternion_from_euler(0, 0, math.radians(0), axes='sxyz')
+
+        self.navigator.setInitialPose(initial_pose)
+
+        self.navigator.waitUntilNav2Active()
+
+        self.cmd_vel_publisher = self.create_publisher(Twist, 'cmd_vel', 10, callback_group=publisher_callback_group)
+        
         self.timer_period = 0.1 # 100 milliseconds = 10 Hz
         self.timer = self.create_timer(self.timer_period, self.control_loop, callback_group=timer_callback_group)
-    
-    def item_callback(self, msg):
-        self.get_logger().info(f"Received items: {msg}")
-        self.items = msg
-        visible_items = ', '.join([item.colour for item in self.items.data])
-        self.get_logger().info(f"Visible items: {visible_items}")
 
-    # Called every time odom_subscriber receives an Odometry message from the /odom topic
-    #
-    # The Gazebo ROS differential drive plugin generates these messages using kinematic equations, and publishes them
-    # https://github.com/ros-simulation/gazebo_ros_pkgs/blob/ros2/gazebo_plugins/src/gazebo_ros_diff_drive.cpp#L434-L535
-    #
-    # This plugin is configured with physical measurements of the TurtleBot3 in the SDF file that defines the robot model
-    # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/blob/humble-devel/turtlebot3_gazebo/models/turtlebot3_waffle_pi/model.sdf#L476-L507
-    #
-    # The pose estimates are expressed in a coordinate system relative to the starting pose of the robot
+        self.previous_time = self.get_clock().now()
+
+
     def odom_callback(self, msg):
-        self.pose = msg.pose.pose # Store the pose in a class variable
-
-        # Uses tf_transformations package to convert orientation from quaternion to Euler angles (RPY = roll, pitch, yaw)
-        # https://github.com/DLu/tf_transformations
-        #
-        # Roll (rotation around X axis) and pitch (rotation around Y axis) are discarded
-        (roll, pitch, yaw) = euler_from_quaternion([self.pose.orientation.x,
-                                                    self.pose.orientation.y,
-                                                    self.pose.orientation.z,
-                                                    self.pose.orientation.w])
-        
-        
-        self.yaw = yaw # Store the yaw in a class variable
-
-    # Called every time scan_subscriber recieves a LaserScan message from the /scan topic
-    #
-    # The Gazebo RaySensor calculates distance at which rays intersect with obstacles
-    # The data is published by the Gazebo ROS ray sensor plugin
-    # https://github.com/gazebosim/gazebo-classic/tree/gazebo11/gazebo/sensors
-    # https://github.com/ros-simulation/gazebo_ros_pkgs/blob/ros2/gazebo_plugins/src/gazebo_ros_ray_sensor.cpp#L178-L205
-    #
-    # This plugin is configured to match the LiDAR on the TurtleBot3 in the SDF file that defines the robot model
-    # http://wiki.ros.org/hls_lfcd_lds_driver
-    # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/blob/humble-devel/turtlebot3_gazebo/models/turtlebot3_waffle_pi/model.sdf#L132-L165
-    def scan_callback(self, msg):
-        # Group scan ranges into 4 segments
-        # Front, left, and right segments are each 60 degrees
-        # Back segment is 180 degrees
-        front_ranges = msg.ranges[331:359] + msg.ranges[0:30] # 30 to 331 degrees (30 to -30 degrees)
-        left_ranges  = msg.ranges[31:90] # 31 to 90 degrees (31 to 90 degrees)
-        back_ranges  = msg.ranges[91:270] # 91 to 270 degrees (91 to -90 degrees)
-        right_ranges = msg.ranges[271:330] # 271 to 330 degrees (-30 to -91 degrees)
-
-        # Store True/False values for each sensor segment, based on whether the nearest detected obstacle is closer than SCAN_THRESHOLD
-        self.scan_triggered[SCAN_FRONT] = min(front_ranges) < SCAN_THRESHOLD 
-        self.scan_triggered[SCAN_LEFT]  = min(left_ranges)  < SCAN_THRESHOLD
-        self.scan_triggered[SCAN_BACK]  = min(back_ranges)  < SCAN_THRESHOLD
-        self.scan_triggered[SCAN_RIGHT] = min(right_ranges) < SCAN_THRESHOLD
+        self.get_logger().info(f"odom: ({msg.pose.pose.position.x:.2f}, {msg.pose.pose.position.y:.2f})")
 
 
-    # Control loop for the FSM - called periodically by self.timer
     def control_loop(self):
 
+        try:
+            t = self.tf_buffer.lookup_transform(
+                'map',
+                'base_footprint',
+                rclpy.time.Time())
+            
+            self.x = t.transform.translation.x
+            self.y = t.transform.translation.y
 
-        #self.get_logger().info(f"{self.state}")
-        
+            (roll, pitch, yaw) = euler_from_quaternion([t.transform.rotation.x,
+                                                        t.transform.rotation.y,
+                                                        t.transform.rotation.z,
+                                                        t.transform.rotation.w])
+
+            self.distance = math.sqrt(self.x ** 2 + self.y ** 2)
+            self.angle = math.atan2(self.y, self.x)
+
+            # self.get_logger().info(f"self.x: {self.x:.2f}")
+            # self.get_logger().info(f"self.y: {self.y:.2f}")
+            # self.get_logger().info(f"yaw (degrees): {math.degrees(yaw):.2f}")
+            # self.get_logger().info(f"distance: {self.distance:.2f}")
+            # self.get_logger().info(f"angle (degrees): {math.degrees(self.angle):.2f}")
+
+        except TransformException as e:
+            self.get_logger().info(f"{e}")
+
+        time_difference = self.get_clock().now() - self.previous_time
+
+        if time_difference > Duration(seconds = 300):
+            self.navigator.cancelTask()
+            self.previous_time = self.get_clock().now()
+            self.get_logger().info(f"SPINNING...")
+            self.state = State.SPINNING
+
+        self.get_logger().info(f"State: {self.state}")
+
         match self.state:
 
-            case State.FORWARD:
-                visible_items = ', '.join([item.colour for item in self.items.data])
-                self.get_logger().info(f"Visible items: {visible_items}")
+            case State.SET_GOAL:
 
-                if self.scan_triggered[SCAN_FRONT]:
-                    self.previous_yaw = self.yaw
-                    self.state = State.TURNING
-                    self.turn_angle = random.uniform(150, 170)
-                    self.turn_direction = random.choice([TURN_LEFT, TURN_RIGHT])
-                    self.get_logger().info("Detected obstacle in front, turning " + ("left" if self.turn_direction == TURN_LEFT else "right") + f" by {self.turn_angle:.2f} degrees")
+                if len(self.potential_goals) == 0:
+                    self.state = State.SPINNING
                     return
+
+                self.current_goal = random.randint(0, len(self.potential_goals) - 1)
+                angle = random.uniform(-180, 180)
+
+                goal_pose = PoseStamped()
+                goal_pose.header.frame_id = 'map'
+                goal_pose.header.stamp = self.get_clock().now().to_msg()                
+                goal_pose.pose.position = self.potential_goals[self.current_goal]
+
+                del self.potential_goals[self.current_goal]
+
+                (goal_pose.pose.orientation.x,
+                 goal_pose.pose.orientation.y,
+                 goal_pose.pose.orientation.z,
+                 goal_pose.pose.orientation.w) = quaternion_from_euler(0, 0, math.radians(angle), axes='sxyz')
                 
-                if self.scan_triggered[SCAN_LEFT] or self.scan_triggered[SCAN_RIGHT]:
-                    self.previous_yaw = self.yaw
-                    self.state = State.TURNING
-                    self.turn_angle = 45
+                self.get_logger().info(f"Remaining goals:")
 
-                    if self.scan_triggered[SCAN_LEFT] and self.scan_triggered[SCAN_RIGHT]:
-                        self.turn_direction = random.choice([TURN_LEFT, TURN_RIGHT])
-                        self.get_logger().info("Detected obstacle to both the left and right, turning " + ("left" if self.turn_direction == TURN_LEFT else "right") + f" by {self.turn_angle:.2f} degrees")
-                    elif self.scan_triggered[SCAN_LEFT]:
-                        self.turn_direction = TURN_RIGHT
-                        self.get_logger().info(f"Detected obstacle to the left, turning right by {self.turn_angle} degrees")
-                    else: # self.scan_triggered[SCAN_RIGHT]
-                        self.turn_direction = TURN_LEFT
-                        self.get_logger().info(f"Detected obstacle to the right, turning left by {self.turn_angle} degrees")
-                    return
+                for goal in self.potential_goals:
+                    self.get_logger().info(f"{goal}")
                 
-                if len(self.items.data) > 0:
-                    self.state = State.COLLECTING
-                    return
+                self.get_logger().info(f"Navigating to: ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f}), {angle:.2f} degrees")
 
-                msg = Twist()
-                msg.linear.x = LINEAR_VELOCITY
-                self.cmd_vel_publisher.publish(msg)
+                self.navigator.goToPose(goal_pose)
+                self.state = State.NAVIGATING
 
-                difference_x = self.pose.position.x - self.previous_pose.position.x
-                difference_y = self.pose.position.y - self.previous_pose.position.y
-                distance_travelled = math.sqrt(difference_x ** 2 + difference_y ** 2)
+            case State.NAVIGATING:
 
-                # self.get_logger().info(f"Driven {distance_travelled:.2f} out of {self.goal_distance:.2f} metres")
+                if not self.navigator.isTaskComplete():
 
-                if distance_travelled >= self.goal_distance:
-                    self.previous_yaw = self.yaw
-                    self.state = State.TURNING
-                    self.turn_angle = random.uniform(30, 150)
-                    self.turn_direction = random.choice([TURN_LEFT, TURN_RIGHT])
-                    self.get_logger().info("Goal reached, turning " + ("left" if self.turn_direction == TURN_LEFT else "right") + f" by {self.turn_angle:.2f} degrees")
+                    feedback = self.navigator.getFeedback()
+                    self.get_logger().info(f"Estimated time of arrival: {(Duration.from_msg(feedback.estimated_time_remaining).nanoseconds / 1e9):.0f} seconds")
 
-            case State.TURNING:
+                    if Duration.from_msg(feedback.navigation_time) > Duration(seconds = 30):
+                        self.get_logger().info(f"Navigation took too long... cancelling")
+                        self.navigator.cancelTask()
 
-                self.get_logger().info("Turning state")
+                else:
 
-                if len(self.items.data) > 0:
-                    self.state = State.COLLECTING
-                    return
+                    result = self.navigator.getResult()
 
-                msg = Twist()
-                msg.angular.z = self.turn_direction * ANGULAR_VELOCITY
-                self.cmd_vel_publisher.publish(msg)
+                    match result:
 
-                # self.get_logger().info(f"Turned {math.degrees(math.fabs(yaw_difference)):.2f} out of {self.turn_angle:.2f} degrees")
+                        case TaskResult.SUCCEEDED:
+                            self.get_logger().info(f"Goal succeeded!")
 
-                yaw_difference = angles.normalize_angle(self.yaw - self.previous_yaw)                
+                            self.get_logger().info(f"Spinning")
 
-                if math.fabs(yaw_difference) >= math.radians(self.turn_angle):
-                    self.previous_pose = self.pose
-                    self.goal_distance = random.uniform(1.0, 2.0)
-                    self.state = State.FORWARD
-                    self.get_logger().info(f"Finished turning, driving forward by {self.goal_distance:.2f} metres")
+                            self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
+                            self.state = State.SPINNING
 
-            case State.COLLECTING:
+                        case TaskResult.CANCELED:
+                            self.get_logger().info(f"Goal was canceled!")
+                            
+                            self.state = State.SET_GOAL
 
-                if len(self.items.data) == 0:
-                    self.previous_pose = self.pose
-                    self.state = State.FORWARD
-                    return
-                
-                item = self.items.data[0]
+                        case TaskResult.FAILED:
+                            self.get_logger().info(f"Goal failed!")
 
-                # Obtained by curve fitting from experimental runs.
-                estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
+                            self.state = State.SET_GOAL
 
-                self.get_logger().info(f'Estimated distance {estimated_distance}')
+                        case _:
+                            self.get_logger().info(f"Goal has an invalid return status!")
 
-                if estimated_distance <= 0.35:
-                    rqt = ItemRequest.Request()
-                    rqt.robot_id = self.robot_id
-                    try:
-                        future = self.pick_up_service.call_async(rqt)
-                        self.executor.spin_until_future_complete(future)
-                        response = future.result()
-                        if response.success:
-                            self.get_logger().info('Item picked up.')
-                            self.state = State.FORWARD
-                            self.items.data = []
-                        else:
-                            self.get_logger().info('Unable to pick up item: ' + response.message)
-                    except Exception as e:
-                        self.get_logger().info('Exception ' + e)   
+            case State.SPINNING:
 
-                msg = Twist()
-                msg.linear.x = 0.25 * estimated_distance
-                msg.angular.z = item.x / 320.0
-                self.cmd_vel_publisher.publish(msg)
+                if not self.navigator.isTaskComplete():
+
+                    feedback = self.navigator.getFeedback()
+                    self.get_logger().info(f"Turned: {math.degrees(feedback.angular_distance_traveled):.2f} degrees")
+
+                else:
+
+                    result = self.navigator.getResult()
+
+                    match result:
+
+                        case TaskResult.SUCCEEDED:
+                            self.get_logger().info(f"Goal succeeded!")
+
+                            self.get_logger().info(f"Backing up")
+
+                            self.navigator.backup(backup_dist=0.15, backup_speed=0.025, time_allowance=10)
+                            self.state = State.BACKUP
+
+                        case TaskResult.CANCELED:
+                            self.get_logger().info(f"Goal was canceled!")
+
+                            self.state = State.SET_GOAL
+
+                        case TaskResult.FAILED:
+                            self.get_logger().info(f"Goal failed!")
+
+                            self.state = State.SET_GOAL
+
+                        case _:
+                            self.get_logger().info(f"Goal has an invalid return status!")
+
+            case State.BACKUP:
+
+                if not self.navigator.isTaskComplete():
+
+                    feedback = self.navigator.getFeedback()
+                    self.get_logger().info(f"Distance travelled: {feedback.distance_traveled:.2f} metres")
+
+                else:
+
+                    result = self.navigator.getResult()
+
+                    match result:
+
+                        case TaskResult.SUCCEEDED:
+                            self.get_logger().info(f"Goal succeeded!")
+
+                            self.state = State.SET_GOAL
+
+                        case TaskResult.CANCELED:
+                            self.get_logger().info(f"Goal was canceled!")
+
+                            self.state = State.SET_GOAL
+
+                        case TaskResult.FAILED:
+                            self.get_logger().info(f"Goal failed!")
+
+                            self.state = State.SET_GOAL
+
+                        case _:
+                            self.get_logger().info(f"Goal has an invalid return status!")
+
 
             case _:
                 pass
 
-
     def destroy_node(self):
-        msg = Twist()
-        self.cmd_vel_publisher.publish(msg)
-        self.get_logger().info(f"Stopping: {msg}")
+        self.get_logger().info(f"Shutting down")
+        self.navigator.lifecycleShutdown()
+        self.navigator.destroyNode()
         super().destroy_node()
-
+        
 
 def main(args=None):
 
-    rclpy.init(args = args, signal_handler_options = SignalHandlerOptions.NO)
+    rclpy.init(args = args)
 
-    node = RobotController()
+    node = AutonomousNavigation()
+
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
 
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     except ExternalShutdownException:
         sys.exit(1)
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.try_shutdown()
 
