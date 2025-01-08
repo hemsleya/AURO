@@ -28,7 +28,8 @@ class State(Enum):
     NAVIGATING = 1
     SPINNING = 2
     BACKUP = 3
-    HOMING = 4
+    COLLECTING = 4
+    OFFLOADING = 5
 
 class AutonomousNavigation(Node):
 
@@ -51,10 +52,16 @@ class AutonomousNavigation(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.x = 0.0
-        self.y = 0.0
+        self.declare_parameter('x', 0.0)
+        self.declare_parameter('y', 0.0)
+        self.declare_parameter('yaw', 0.0)
+
+        self.x = self.get_parameter('x').value
+        self.y = self.get_parameter('y').value
         self.distance = 0.0
-        self.angle = 0.0
+        self.angle = self.get_parameter('yaw').value
+        
+        self.get_logger().info(f"Initial pose: ({self.x:.2f}, {self.y:.2f}), {self.angle:.2f} degrees")
 
         self.current_goal = 0
         self.potential_goals = []
@@ -67,12 +74,18 @@ class AutonomousNavigation(Node):
         self.potential_goals.append(Point(x = -3.42, y =  -2.46))
 
         self.navigator = BasicNavigator()
+        
+        self.robot_id = self.get_namespace().replace('/', '')
+        self.get_logger().info(f"Robot ID: {self.get_namespace()}")
 
         initial_pose = PoseStamped()
+        initial_pose.pose.position.x = self.x
+        initial_pose.pose.position.y = self.y
+        initial_pose.pose.orientation.z = 0.0
+        initial_pose.pose.orientation.w = self.angle
+        self.get_logger().info(f"Initial Pose: {initial_pose}")
         initial_pose.header.frame_id = 'map'
         initial_pose.header.stamp = self.get_clock().now().to_msg()
-        initial_pose.pose.position.x = -2.0
-        initial_pose.pose.position.y = -0.5
 
         (initial_pose.pose.orientation.x,
          initial_pose.pose.orientation.y,
@@ -128,8 +141,8 @@ class AutonomousNavigation(Node):
         if time_difference > Duration(seconds = 300):
             self.navigator.cancelTask()
             self.previous_time = self.get_clock().now()
-            self.get_logger().info(f"Homing...")
-            self.state = State.HOMING
+            self.get_logger().info(f"SPINNING...")
+            self.state = State.SPINNING
 
         self.get_logger().info(f"State: {self.state}")
 
@@ -138,7 +151,7 @@ class AutonomousNavigation(Node):
             case State.SET_GOAL:
 
                 if len(self.potential_goals) == 0:
-                    self.state = State.HOMING
+                    self.state = State.SPINNING
                     return
 
                 self.current_goal = random.randint(0, len(self.potential_goals) - 1)
@@ -269,162 +282,7 @@ class AutonomousNavigation(Node):
                         case _:
                             self.get_logger().info(f"Goal has an invalid return status!")
 
-            case State.HOMING:
 
-                if self.distance < 0.1:
-                    self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
-                    self.previous_time = self.get_clock().now()
-                    self.get_logger().info(f"Made it home!")
-                    self.state = State.SPINNING
-                    return
-                
-                try:
-                    t = self.tf_buffer.lookup_transform(
-                        'base_footprint',
-                        'map',
-                        rclpy.time.Time())
-                    
-                    x = t.transform.translation.x
-                    y = t.transform.translation.y
-                    
-                    (roll, pitch, yaw) = euler_from_quaternion([t.transform.rotation.x,
-                                                                t.transform.rotation.y,
-                                                                t.transform.rotation.z,
-                                                                t.transform.rotation.w])
-
-                    distance = math.sqrt(x ** 2 + y ** 2)
-                    angle = math.atan2(y, x)
-
-                    self.get_logger().info(f"x: {x:.2f}")
-                    self.get_logger().info(f"y: {y:.2f}")
-                    self.get_logger().info(f"yaw (degrees): {math.degrees(yaw):.2f}")
-                    self.get_logger().info(f"distance: {distance:.2f}")
-                    self.get_logger().info(f"angle (degrees): {math.degrees(angle):.2f}")
-
-                    msg = Twist()
-
-                    if math.fabs(angle) > math.radians(15):
-                        msg.linear.x = 0.0
-                    else:
-                        msg.linear.x = 0.3 * distance
-                        
-                    msg.angular.z = 0.5 * angle
-
-                    self.cmd_vel_publisher.publish(msg)
-
-                except TransformException as e:
-                    self.get_logger().info(f"{e}")
-
-            case State.FORWARD:
-
-                if self.scan_triggered[SCAN_FRONT]:
-                    self.previous_yaw = self.yaw
-                    self.state = State.TURNING
-                    self.turn_angle = random.uniform(150, 170)
-                    self.turn_direction = random.choice([TURN_LEFT, TURN_RIGHT])
-                    self.get_logger().info("Detected obstacle in front, turning " + ("left" if self.turn_direction == TURN_LEFT else "right") + f" by {self.turn_angle:.2f} degrees")
-                    return
-                
-                if self.scan_triggered[SCAN_LEFT] or self.scan_triggered[SCAN_RIGHT]:
-                    self.previous_yaw = self.yaw
-                    self.state = State.TURNING
-                    self.turn_angle = 45
-
-                    if self.scan_triggered[SCAN_LEFT] and self.scan_triggered[SCAN_RIGHT]:
-                        self.turn_direction = random.choice([TURN_LEFT, TURN_RIGHT])
-                        self.get_logger().info("Detected obstacle to both the left and right, turning " + ("left" if self.turn_direction == TURN_LEFT else "right") + f" by {self.turn_angle:.2f} degrees")
-                    elif self.scan_triggered[SCAN_LEFT]:
-                        self.turn_direction = TURN_RIGHT
-                        self.get_logger().info(f"Detected obstacle to the left, turning right by {self.turn_angle} degrees")
-                    else: # self.scan_triggered[SCAN_RIGHT]
-                        self.turn_direction = TURN_LEFT
-                        self.get_logger().info(f"Detected obstacle to the right, turning left by {self.turn_angle} degrees")
-                    return
-                
-                if len(self.items.data) > 0 and not self.holding_item():
-                    self.state = State.COLLECTING
-                    return
-                
-                if len(self.zones.data) > 0 and self.holding_item():
-                    self.state = State.SET_GOAL
-                    return
-
-                msg = Twist()
-                msg.linear.x = LINEAR_VELOCITY
-                self.cmd_vel_publisher.publish(msg)
-
-                difference_x = self.pose.position.x - self.previous_pose.position.x
-                difference_y = self.pose.position.y - self.previous_pose.position.y
-                distance_travelled = math.sqrt(difference_x ** 2 + difference_y ** 2)
-
-                # self.get_logger().info(f"Driven {distance_travelled:.2f} out of {self.goal_distance:.2f} metres")
-
-                if distance_travelled >= self.goal_distance:
-                    self.previous_yaw = self.yaw
-                    self.state = State.TURNING
-                    self.turn_angle = random.uniform(30, 150)
-                    self.turn_direction = random.choice([TURN_LEFT, TURN_RIGHT])
-                    self.get_logger().info("Goal reached, turning " + ("left" if self.turn_direction == TURN_LEFT else "right") + f" by {self.turn_angle:.2f} degrees")
-
-            case State.TURNING:
-
-                if len(self.items.data) > 0 and not self.holding_item():
-                    self.state = State.COLLECTING
-                    return
-                
-                if len(self.zones.data) > 0 and self.holding_item():
-                    self.state = State.SET_GOAL
-                    return
-
-                msg = Twist()
-                msg.angular.z = self.turn_direction * ANGULAR_VELOCITY
-                self.cmd_vel_publisher.publish(msg)
-
-                # self.get_logger().info(f"Turned {math.degrees(math.fabs(yaw_difference)):.2f} out of {self.turn_angle:.2f} degrees")
-
-                yaw_difference = angles.normalize_angle(self.yaw - self.previous_yaw)                
-
-                if math.fabs(yaw_difference) >= math.radians(self.turn_angle):
-                    self.previous_pose = self.pose
-                    self.goal_distance = random.uniform(1.0, 2.0)
-                    self.state = State.FORWARD
-                    self.get_logger().info(f"Finished turning, driving forward by {self.goal_distance:.2f} metres")
-
-            case State.COLLECTING:
-
-                if len(self.items.data) == 0:
-                    self.previous_pose = self.pose
-                    self.state = State.FORWARD
-                    return
-                
-                item = self.items.data[0]
-
-                # Obtained by curve fitting from experimental runs.
-                estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
-
-                self.get_logger().info(f'Estimated distance {estimated_distance}')
-
-                if estimated_distance <= 0.35:
-                    rqt = ItemRequest.Request()
-                    rqt.robot_id = self.robot_id
-                    try:
-                        future = self.pick_up_service.call_async(rqt)
-                        self.executor.spin_until_future_complete(future)
-                        response = future.result()
-                        if response.success:
-                            self.get_logger().info('Item picked up.')
-                            self.state = State.OFFLOADING
-                            self.items.data = []
-                        else:
-                            self.get_logger().info('Unable to pick up item: ' + response.message)
-                    except Exception as e:
-                        self.get_logger().info('Exception ' + e)   
-
-                msg = Twist()
-                msg.linear.x = 0.25 * estimated_distance
-                msg.angular.z = item.x / 320.0
-                self.cmd_vel_publisher.publish(msg)
-                
             case _:
                 pass
 
