@@ -12,7 +12,7 @@ from rclpy.duration import Duration
 from rclpy.qos import QoSPresetProfiles
 
 from geometry_msgs.msg import PoseStamped, Point, Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, OccupancyGrid
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from sensor_msgs.msg import LaserScan
 from tf2_ros import TransformException
@@ -39,12 +39,14 @@ class AutonomousNavigation(Node):
     def __init__(self):
         super().__init__('autonomous_navigation_multithreaded')
 
-        self.state = State.SET_GOAL
+        self.state = State.SEARCHING
         self.items = ItemList()
         self.zones = ZoneList()
         self.robots = RobotList()
         self.item_holders = ItemHolders()
-        
+        self.OccupancyGrid = OccupancyGrid()
+        self.itemFound = False
+
 
         subscriber_callback_group = MutuallyExclusiveCallbackGroup()
         timer_callback_group = MutuallyExclusiveCallbackGroup()
@@ -69,15 +71,16 @@ class AutonomousNavigation(Node):
         
         self.get_logger().info(f"Initial pose: ({self.x:.2f}, {self.y:.2f}), {self.angle:.2f} degrees")
 
-        self.current_goal = 0
-        self.potential_goals = []
+        self.zone_goal_index = 0
+        self.zone_goals = []
+        self.current_goal = Point()
 
-        self.potential_goals.append(Point(x = 0.0, y = 0.0))
+        self.zone_goals.append(Point(x = 0.0, y = 0.0))
 
-        self.potential_goals.append(Point(x = 2.57, y = 2.5))
-        self.potential_goals.append(Point(x = 2.57, y = -2.46))
-        self.potential_goals.append(Point(x = -3.42, y =  2.5))
-        self.potential_goals.append(Point(x = -3.42, y =  -2.46))
+        self.zone_goals.append(Point(x = 2.57, y = 2.5))
+        self.zone_goals.append(Point(x = 2.57, y = -2.46))
+        self.zone_goals.append(Point(x = -3.42, y =  2.5))
+        self.zone_goals.append(Point(x = -3.42, y =  -2.46))
 
         self.navigator = BasicNavigator()
         
@@ -124,6 +127,9 @@ class AutonomousNavigation(Node):
 
     def item_holders_callback(self, msg):
         self.item_holders = msg
+
+    def map_server_callback(self, msg):
+        self.OccupancyGrid = msg
     
     #this code from week 5 was making it spin?
     def scan_callback(self, msg):
@@ -170,46 +176,53 @@ class AutonomousNavigation(Node):
         match self.state:
 
             case State.SET_GOAL:
+                self.get_logger().info(f"holding_item: {self.holding_item()}")
+                self.get_logger().info(f"not holding item: { not self.holding_item()}")
                 if not self.holding_item():
+                    self.get_logger().info(f"visible items: {self.items.data}")
                     if len(self.items.data) > 0:
                         item = self.items.data[0]
                         self.current_goal = Point(x = item.x + self.x, y = item.y + self.y)
                     else:
                         #self.state = State.SEARCHING
-                        self.current_goal = random.randint(0, len(self.potential_goals) - 1)
+                        self.get_logger().info(f"no items seen, setting nav goal for 0,0")
+                        self.current_goal = Point(x = 0.0, y = 0.0)
 
                 else:
-                    if len(self.potential_goals) == 0:
+                    if len(self.zone_goals) == 0:
                         self.state = State.SPINNING
                         return
 
-                    self.current_goal = random.randint(0, len(self.potential_goals) - 1)
+                    self.current_goal = self.zone_goals[random.randint(0, len(self.zone_goals) - 1)]
                 
-                angle = random.uniform(-180, 180)
+                goal_pose = self.create_goal_pose(self.current_goal)
 
-                goal_pose = PoseStamped()
-                goal_pose.header.frame_id = 'map'
-                goal_pose.header.stamp = self.get_clock().now().to_msg()                
-                goal_pose.pose.position = self.potential_goals[self.current_goal]
+                self.get_logger().info(f"visible items: {self.items.data}")
 
-                del self.potential_goals[self.current_goal]
-
-                (goal_pose.pose.orientation.x,
-                 goal_pose.pose.orientation.y,
-                 goal_pose.pose.orientation.z,
-                 goal_pose.pose.orientation.w) = quaternion_from_euler(0, 0, math.radians(angle), axes='sxyz')
                 
-                self.get_logger().info(f"Remaining goals:")
-
-                for goal in self.potential_goals:
-                    self.get_logger().info(f"{goal}")
                 
-                self.get_logger().info(f"Navigating to: ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f}), {angle:.2f} degrees")
+                self.get_logger().info(f"Goal: {self.zone_goals}")
+
+                
+                self.get_logger().info(f"Navigating to: ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f})")
 
                 self.navigator.goToPose(goal_pose)
                 self.state = State.NAVIGATING
 
             case State.NAVIGATING:
+                if not self.holding_item():
+                    self.get_logger().info(f"visible items: {self.items.data}")
+                    if len(self.items.data) > 0:
+                        self.get_logger().info(f"visible items: {self.items.data}")
+                        item = self.items.data[0]
+                        if not self.itemFound:
+                            self.current_goal = Point(x = item.x + self.x, y = item.y + self.y)
+                            self.navigator.goToPose(self.create_goal_pose(self.current_goal))
+                            self.itemFound = True
+                        estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
+                        if estimated_distance <= 0.35:
+                            self.try_pick_up_item()
+                    
 
                 if not self.navigator.isTaskComplete():
 
@@ -296,8 +309,11 @@ class AutonomousNavigation(Node):
 
                         case TaskResult.SUCCEEDED:
                             self.get_logger().info(f"Goal succeeded!")
-
-                            self.state = State.SET_GOAL
+                            if self.holding_item():
+                                self.get_logger().info(f"offloading item")
+                                self.state = State.SET_GOAL
+                                return
+                            self.state = State.SEARCHING
 
                         case TaskResult.CANCELED:
                             self.get_logger().info(f"Goal was canceled!")
@@ -312,15 +328,32 @@ class AutonomousNavigation(Node):
                         case _:
                             self.get_logger().info(f"Goal has an invalid return status!")
 
-
+            case State.SEARCHING:
+                
+                self.get_logger().info(f"Searching for items...")
+                if len(self.items.data) > 0:
+                    self.get_logger().info(f"items found...")
+                    self.state = State.SET_GOAL
+                else:
+                    self.get_logger().info(f"items not found, getting random coordinates")
+                    random_goal_x = self.x + random.uniform(-5, 5)
+                    random_goal_y = self.y + random.uniform(-5, 5)
+                    self.get_logger().info(f"random coordinates: {random_goal_x, random_goal_y}")
+                    self.current_goal = Point(x=random_goal_x, y=random_goal_y)
+                    self.get_logger().info(f"calling nav.goToPose")
+                    self.navigator.goToPose(self.create_goal_pose(self.current_goal))
+                    self.get_logger().info(f"Setting random goal: ({random_goal_x}, {random_goal_y})")
+                    #self.state = State.NAVIGATING
             case _:
                 pass
 
     def holding_item(self):
+        self.get_logger().info(f"item_holders: {self.item_holders.data}")
         for item_holder in self.item_holders.data:
             if item_holder.robot_id == self.robot_id:
-                return True
-        return False    
+                return item_holder.holding_item
+        return False  
+      
     def setup_subscribers(self, subscriber_callback_group):
         self.odom_subscriber = self.create_subscription(
             Odometry,
@@ -362,6 +395,45 @@ class AutonomousNavigation(Node):
             self.item_holders_callback,
             10, callback_group=subscriber_callback_group
         )
+
+        self.costmap_subscriber = self.create_subscription(
+            OccupancyGrid,
+            'global_costmap/costmap',
+            self.map_server_callback,
+            10,
+            callback_group=subscriber_callback_group)
+
+    def try_pick_up_item(self):
+        rqt = ItemRequest.Request()
+        rqt.robot_id = self.robot_id
+        try:
+            future = self.pick_up_service.call_async(rqt)
+            self.executor.spin_until_future_complete(future)
+            response = future.result()
+            if response.success:
+                self.get_logger().info('Item picked up.')
+                self.state = State.SET_GOAL
+                self.items.data = []
+            else:
+                self.get_logger().info('Unable to pick up item: ' + response.message)
+        except Exception as e:
+            self.get_logger().info('Exception ' + e)   
+
+    def create_goal_pose(self, goal):
+        goal_pose = PoseStamped()
+        goal_pose.header.frame_id = 'map'
+        goal_pose.header.stamp = self.get_clock().now().to_msg()                
+        goal_pose.pose.position = goal
+
+        angle = random.uniform(-180, 180)
+
+        (goal_pose.pose.orientation.x,
+         goal_pose.pose.orientation.y,
+         goal_pose.pose.orientation.z,
+         goal_pose.pose.orientation.w) = quaternion_from_euler(0, 0, math.radians(angle), axes='sxyz')
+
+        return goal_pose
+    
     def destroy_node(self):
         self.get_logger().info(f"Shutting down")
         self.navigator.lifecycleShutdown()
