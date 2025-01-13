@@ -40,6 +40,11 @@ class AutonomousNavigation(Node):
         super().__init__('autonomous_navigation_multithreaded')
 
         self.state = State.SET_GOAL
+        self.items = ItemList()
+        self.zones = ZoneList()
+        self.robots = RobotList()
+        self.item_holders = ItemHolders()
+        
 
         subscriber_callback_group = MutuallyExclusiveCallbackGroup()
         timer_callback_group = MutuallyExclusiveCallbackGroup()
@@ -120,9 +125,10 @@ class AutonomousNavigation(Node):
     def item_holders_callback(self, msg):
         self.item_holders = msg
     
+    #this code from week 5 was making it spin?
     def scan_callback(self, msg):
         pass
-    
+
     def control_loop(self):
 
         try:
@@ -164,12 +170,21 @@ class AutonomousNavigation(Node):
         match self.state:
 
             case State.SET_GOAL:
+                if not self.holding_item():
+                    if len(self.items.data) > 0:
+                        item = self.items.data[0]
+                        self.current_goal = Point(x = item.x + self.x, y = item.y + self.y)
+                    else:
+                        #self.state = State.SEARCHING
+                        self.current_goal = random.randint(0, len(self.potential_goals) - 1)
 
-                if len(self.potential_goals) == 0:
-                    self.state = State.SPINNING
-                    return
+                else:
+                    if len(self.potential_goals) == 0:
+                        self.state = State.SPINNING
+                        return
 
-                self.current_goal = random.randint(0, len(self.potential_goals) - 1)
+                    self.current_goal = random.randint(0, len(self.potential_goals) - 1)
+                
                 angle = random.uniform(-180, 180)
 
                 goal_pose = PoseStamped()
@@ -300,7 +315,12 @@ class AutonomousNavigation(Node):
 
             case _:
                 pass
-    
+
+    def holding_item(self):
+        for item_holder in self.item_holders.data:
+            if item_holder.robot_id == self.robot_id:
+                return True
+        return False    
     def setup_subscribers(self, subscriber_callback_group):
         self.odom_subscriber = self.create_subscription(
             Odometry,
