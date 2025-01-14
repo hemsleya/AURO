@@ -45,7 +45,7 @@ class AutonomousNavigation(Node):
         self.robots = RobotList()
         self.item_holders = ItemHolders()
         self.OccupancyGrid = OccupancyGrid()
-        self.itemFound = False
+        self.navigating_to_item = False
 
 
         subscriber_callback_group = MutuallyExclusiveCallbackGroup()
@@ -211,15 +211,22 @@ class AutonomousNavigation(Node):
 
             case State.NAVIGATING:
                 if not self.holding_item():
+                    self.get_logger().info(f"Found item: {self.navigating_to_item}")
                     self.get_logger().info(f"visible items: {self.items.data}")
                     if len(self.items.data) > 0:
                         self.get_logger().info(f"visible items: {self.items.data}")
                         item = self.items.data[0]
-                        if not self.itemFound:
-                            self.current_goal = Point(x = item.x + self.x, y = item.y + self.y)
-                            self.navigator.goToPose(self.create_goal_pose(self.current_goal))
-                            self.itemFound = True
+                        self.get_logger().info(f"item: {item}")
+
                         estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
+                        if not self.navigating_to_item:
+                            theta = math.atan2(item.y, item.x)
+                            self.get_logger().info(f"theta: {theta}, yaw: {self.yaw}")
+                            x_item = self.x + estimated_distance * math.cos(theta)
+                            y_item = self.y + estimated_distance * math.sin(theta)
+                            self.current_goal = Point(x = x_item, y = y_item)
+                            self.navigator.goToPose(self.create_goal_pose(self.current_goal))
+                            self.navigating_to_item = True
                         if estimated_distance <= 0.35:
                             self.try_pick_up_item()
                     
@@ -241,6 +248,11 @@ class AutonomousNavigation(Node):
 
                         case TaskResult.SUCCEEDED:
                             self.get_logger().info(f"Goal succeeded!")
+
+                            if self.navigating_to_item:
+                                self.navigating_to_item = False
+                                self.try_pick_up_item()
+                                
 
                             self.get_logger().info(f"Spinning")
 
@@ -309,8 +321,9 @@ class AutonomousNavigation(Node):
 
                         case TaskResult.SUCCEEDED:
                             self.get_logger().info(f"Goal succeeded!")
-                            if self.holding_item():
+                            if self.holding_item() and not self.navigating_to_item:
                                 self.get_logger().info(f"offloading item")
+                                self.try_offload_item()
                                 self.state = State.SET_GOAL
                                 return
                             self.state = State.SEARCHING
@@ -417,6 +430,24 @@ class AutonomousNavigation(Node):
             else:
                 self.get_logger().info('Unable to pick up item: ' + response.message)
         except Exception as e:
+            self.get_logger().info('Exception ' + e)  
+    
+    def try_offload_item(self):
+        rqt = ItemRequest.Request()
+        rqt.robot_id = self.robot_id
+        try:
+            future = self.offload_service.call_async(rqt)
+            self.executor.spin_until_future_complete(future)
+            response = future.result()
+            self.get_logger().info(f"response: {response}")
+            if response.success:
+                self.get_logger().info('Item offloaded.')
+
+                self.state = State.SET_GOAL
+                self.items.data = []
+            else:
+                self.get_logger().info('Unable to pick up item: ' + response.message)
+        except Exception as e:
             self.get_logger().info('Exception ' + e)   
 
     def create_goal_pose(self, goal):
@@ -432,6 +463,7 @@ class AutonomousNavigation(Node):
          goal_pose.pose.orientation.z,
          goal_pose.pose.orientation.w) = quaternion_from_euler(0, 0, math.radians(angle), axes='sxyz')
 
+        self.get_logger().info(f"Goal pose: {goal_pose}")
         return goal_pose
     
     def destroy_node(self):
