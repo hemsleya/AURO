@@ -34,20 +34,21 @@ class State(Enum):
     NAVIGATING = 1
     SPINNING = 2
     BACKUP = 3
-    SEARCHING = 4
 
 class AutonomousNavigation(Node):
 
     def __init__(self):
         super().__init__('autonomous_navigation_multithreaded')
 
-        self.state = State.SEARCHING
+        self.state = State.SET_GOAL
         self.items = ItemList()
         self.zones = ZoneList()
         self.robots = RobotList()
         self.item_holders = ItemHolders()
         self.OccupancyGrid = OccupancyGrid()
         self.navigating_to_item = False
+        self.navigating_to_zone = False
+        self.holding_item = False
 
 
         subscriber_callback_group = MutuallyExclusiveCallbackGroup()
@@ -133,6 +134,11 @@ class AutonomousNavigation(Node):
 
     def item_holders_callback(self, msg):
         self.item_holders = msg
+        for item_holder in self.item_holders.data:
+            if item_holder.robot_id == self.robot_id:
+                self.holding_item = True
+                return    
+        self.holding_item = False
 
     def map_server_callback(self, msg):
         self.OccupancyGrid = msg
@@ -183,21 +189,32 @@ class AutonomousNavigation(Node):
         match self.state:
 
             case State.SET_GOAL:
-                if not self.holding_item():
+                self.get_logger().info(f"Setting goal...")
+                #if not holding an item, set goal to item
+                #if no items found, set goal to random coordinates
+                self.get_logger().info(f"holding_item: {self.holding_item}")
+                if not self.holding_item:
                     if len(self.items.data) > 0:
+                        self.get_logger().info(f"items found, setting goal...")
                         item = self.items.data[0]
                         self.current_goal = Point(x = item.x + self.x, y = item.y + self.y)
+                        self.navigating_to_item = True
                     else:
-                        #self.state = State.SEARCHING
-                        self.get_logger().info(f"no items seen, setting nav goal for 0,0")
-                        self.current_goal = Point(x = 0.0, y = 0.0)
-
+                        self.get_logger().info(f"items not found, getting random coordinate...")
+                        random_goal_x = self.x + random.uniform(-5, 5)
+                        random_goal_y = self.y + random.uniform(-5, 5)
+                        self.current_goal = Point(x=random_goal_x, y=random_goal_y)
+                        
+                
+                #if holding an item, set goal to zone
+                #if no zones, spin
                 else:
                     if len(self.zone_goals) == 0:
                         self.state = State.SPINNING
                         return
 
-                    self.current_goal = self.zone_goals[random.randint(0, len(self.zone_goals) - 1)]
+                    self.current_goal = self.pick_zone
+                    self.navigating_to_zone = True
                 
                 goal_pose = self.create_goal_pose(self.current_goal)
                 
@@ -207,21 +224,20 @@ class AutonomousNavigation(Node):
                 self.state = State.NAVIGATING
 
             case State.NAVIGATING:
-                if not self.holding_item():
-                    if len(self.items.data) > 0:
-                        item = self.items.data[0]
-
-                        estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
-                        if not self.navigating_to_item:
-                            theta = math.atan2(item.y, item.x)
-                            self.get_logger().info(f"theta: {theta}, yaw: {self.angle}")
-                            x_item = self.x + estimated_distance * math.cos(theta)
-                            y_item = self.y + estimated_distance * math.sin(theta)
-                            self.current_goal = Point(x = x_item, y = y_item)
-                            self.navigator.goToPose(self.create_goal_pose(self.current_goal))
-                            self.navigating_to_item = True
-                        if estimated_distance <= 0.35:
-                            await self.try_toggle_item()
+                #if not holding item, and items are found, set new goal
+                if not self.holding_item and len(self.items.data) > 0 and not self.navigating_to_item:
+                    #if len(self.items.data) > 0:
+                        self.state = State.SET_GOAL
+                        # item = self.items.data[0]
+                        # estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
+                        # #if not self.navigating_to_item:
+                        # theta = math.atan2(item.y, item.x)
+                        # self.get_logger().info(f"theta: {theta}, yaw: {self.angle}")
+                        # x_item = self.x + estimated_distance * math.cos(theta)
+                        # y_item = self.y + estimated_distance * math.sin(theta)
+                        # self.current_goal = Point(x = x_item, y = y_item)
+                        # self.navigator.goToPose(self.create_goal_pose(self.current_goal))
+                        # self.navigating_to_item = True
                     
 
                 if not self.navigator.isTaskComplete():
@@ -242,10 +258,10 @@ class AutonomousNavigation(Node):
                         case TaskResult.SUCCEEDED:
                             self.get_logger().info(f"Goal succeeded!")
 
-                            if self.navigating_to_item:
-                                self.navigating_to_item = False
+                            if self.navigating_to_item or self.navigating_to_zone:
                                 await self.try_toggle_item()
-                                
+                            else:
+                                self.state = State.SET_GOAL
 
                             self.get_logger().info(f"Spinning")
 
@@ -256,11 +272,15 @@ class AutonomousNavigation(Node):
                             self.get_logger().info(f"Goal was canceled!")
                             
                             self.state = State.SET_GOAL
+                            self.navigating_to_item = False
+                            self.navigating_to_zone = False
 
                         case TaskResult.FAILED:
                             self.get_logger().info(f"Goal failed!")
 
                             self.state = State.SET_GOAL
+                            self.navigating_to_item = False
+                            self.navigating_to_zone = False
 
                         case _:
                             self.get_logger().info(f"Goal has an invalid return status!")
@@ -283,7 +303,7 @@ class AutonomousNavigation(Node):
 
                             self.get_logger().info(f"Backing up")
 
-                            self.navigator.backup(backup_dist=0.15, backup_speed=0.025, time_allowance=10)
+                            self.navigator.backup(backup_dist=0.05, backup_speed=0.025, time_allowance=5)
                             self.state = State.BACKUP
 
                         case TaskResult.CANCELED:
@@ -314,11 +334,7 @@ class AutonomousNavigation(Node):
 
                         case TaskResult.SUCCEEDED:
                             self.get_logger().info(f"Goal succeeded!")
-                            if self.holding_item() and not self.navigating_to_item:
-                                await self.try_toggle_item()
-                                self.state = State.SET_GOAL
-                                return
-                            self.state = State.SEARCHING
+                            self.state = State.SET_GOAL
 
                         case TaskResult.CANCELED:
                             self.get_logger().info(f"Goal was canceled!")
@@ -333,27 +349,9 @@ class AutonomousNavigation(Node):
                         case _:
                             self.get_logger().info(f"Goal has an invalid return status!")
 
-            case State.SEARCHING:
-                
-                self.get_logger().info(f"Searching for items...")
-                if len(self.items.data) > 0:
-                    self.get_logger().info(f"items found...")
-                    self.state = State.SET_GOAL
-                else:
-                    self.get_logger().info(f"items not found, getting random coordinates")
-                    random_goal_x = self.x + random.uniform(-5, 5)
-                    random_goal_y = self.y + random.uniform(-5, 5)
-                    self.current_goal = Point(x=random_goal_x, y=random_goal_y)
-                    self.navigator.goToPose(self.create_goal_pose(self.current_goal))
-                    #self.state = State.NAVIGATING
             case _:
                 pass
 
-    def holding_item(self):
-        for item_holder in self.item_holders.data:
-            if item_holder.robot_id == self.robot_id:
-                return item_holder.holding_item
-        return False  
       
     def setup_subscribers(self, subscriber_callback_group):
         self.odom_subscriber = self.create_subscription(
@@ -404,10 +402,16 @@ class AutonomousNavigation(Node):
             10,
             callback_group=subscriber_callback_group)
 
+    def pick_zone(self):
+        return self.zone_goals[random.randint(0, len(self.zone_goals) - 1)]    
+
     async def try_toggle_item(self):
-        self.get_logger().info('Attempting to pick up item...')
+        self.get_logger().info('Attempting to toggle item...')
         try:
-            future = await self.pick_up_service.call_async(self.rqt)
+            if self.holding_item:
+                future = await self.offload_service.call_async(self.rqt)
+            else:
+                future = await self.pick_up_service.call_async(self.rqt)
             #self.executor.spin_until_future_complete(future)
             response = future
             retry_count = 0
@@ -419,6 +423,8 @@ class AutonomousNavigation(Node):
                 self.get_logger().info(response.message)
                 self.state = State.SET_GOAL
                 self.items.data = []
+                self.navigating_to_item = False
+                self.navigating_to_zone = False
             else:
                 self.get_logger().info('Unable to pick up item: ' + response.message)
         except Exception as e:
@@ -461,9 +467,13 @@ def main(args=None):
     try:
         executor.spin()
     except KeyboardInterrupt:
+        node.get_logger().info('KeyboardInterrupt')
         pass
     except ExternalShutdownException:
+        node.get_logger().info('ExternalShutdownException')
         sys.exit(1)
+    except Exception as e:
+        node.get_logger().info(f'Exception: {e}')
     finally:
         executor.shutdown()
         node.destroy_node()
