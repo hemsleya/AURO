@@ -19,6 +19,8 @@ from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
+import asyncio
+
 from tf_transformations import euler_from_quaternion, quaternion_from_euler
 import angles
 
@@ -69,7 +71,7 @@ class AutonomousNavigation(Node):
         self.distance = 0.0
         self.angle = self.get_parameter('yaw').value
         
-        self.get_logger().info(f"Initial pose: ({self.x:.2f}, {self.y:.2f}), {self.angle:.2f} degrees")
+
 
         self.zone_goal_index = 0
         self.zone_goals = []
@@ -86,13 +88,16 @@ class AutonomousNavigation(Node):
         
         self.robot_id = self.get_namespace().replace('/', '')
         self.get_logger().info(f"Robot ID: {self.get_namespace()}")
+        
+        self.rqt = ItemRequest.Request()
+        self.rqt.robot_id = self.robot_id
 
         initial_pose = PoseStamped()
         initial_pose.pose.position.x = self.x
         initial_pose.pose.position.y = self.y
         initial_pose.pose.orientation.z = 0.0
         initial_pose.pose.orientation.w = self.angle
-        self.get_logger().info(f"Initial Pose: {initial_pose}")
+        self.get_logger().info(f"Initial pose: ({self.x:.2f}, {self.y:.2f}), {self.angle:.2f} degrees")
         initial_pose.header.frame_id = 'map'
         initial_pose.header.stamp = self.get_clock().now().to_msg()
 
@@ -110,11 +115,12 @@ class AutonomousNavigation(Node):
         self.timer = self.create_timer(self.timer_period, self.control_loop, callback_group=timer_callback_group)
 
         self.previous_time = self.get_clock().now()
+        self.get_logger().info(f"Starting control loop")
 
 
     def odom_callback(self, msg):
-        self.get_logger().info(f"odom: ({msg.pose.pose.position.x:.2f}, {msg.pose.pose.position.y:.2f})")
-
+        #self.get_logger().info(f"odom: ({msg.pose.pose.position.x:.2f}, {msg.pose.pose.position.y:.2f})")
+        pass
 
     def item_callback(self, msg):
         self.items = msg
@@ -135,7 +141,8 @@ class AutonomousNavigation(Node):
     def scan_callback(self, msg):
         pass
 
-    def control_loop(self):
+    async def control_loop(self):
+        self.get_logger().info(f"Control loop")
 
         try:
             t = self.tf_buffer.lookup_transform(
@@ -176,10 +183,7 @@ class AutonomousNavigation(Node):
         match self.state:
 
             case State.SET_GOAL:
-                self.get_logger().info(f"holding_item: {self.holding_item()}")
-                self.get_logger().info(f"not holding item: { not self.holding_item()}")
                 if not self.holding_item():
-                    self.get_logger().info(f"visible items: {self.items.data}")
                     if len(self.items.data) > 0:
                         item = self.items.data[0]
                         self.current_goal = Point(x = item.x + self.x, y = item.y + self.y)
@@ -196,13 +200,6 @@ class AutonomousNavigation(Node):
                     self.current_goal = self.zone_goals[random.randint(0, len(self.zone_goals) - 1)]
                 
                 goal_pose = self.create_goal_pose(self.current_goal)
-
-                self.get_logger().info(f"visible items: {self.items.data}")
-
-                
-                
-                self.get_logger().info(f"Goal: {self.zone_goals}")
-
                 
                 self.get_logger().info(f"Navigating to: ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f})")
 
@@ -211,30 +208,26 @@ class AutonomousNavigation(Node):
 
             case State.NAVIGATING:
                 if not self.holding_item():
-                    self.get_logger().info(f"Found item: {self.navigating_to_item}")
-                    self.get_logger().info(f"visible items: {self.items.data}")
                     if len(self.items.data) > 0:
-                        self.get_logger().info(f"visible items: {self.items.data}")
                         item = self.items.data[0]
-                        self.get_logger().info(f"item: {item}")
 
                         estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
                         if not self.navigating_to_item:
                             theta = math.atan2(item.y, item.x)
-                            self.get_logger().info(f"theta: {theta}, yaw: {self.yaw}")
+                            self.get_logger().info(f"theta: {theta}, yaw: {self.angle}")
                             x_item = self.x + estimated_distance * math.cos(theta)
                             y_item = self.y + estimated_distance * math.sin(theta)
                             self.current_goal = Point(x = x_item, y = y_item)
                             self.navigator.goToPose(self.create_goal_pose(self.current_goal))
                             self.navigating_to_item = True
                         if estimated_distance <= 0.35:
-                            self.try_pick_up_item()
+                            await self.try_toggle_item()
                     
 
                 if not self.navigator.isTaskComplete():
 
                     feedback = self.navigator.getFeedback()
-                    self.get_logger().info(f"Estimated time of arrival: {(Duration.from_msg(feedback.estimated_time_remaining).nanoseconds / 1e9):.0f} seconds")
+                    #self.get_logger().info(f"Estimated time of arrival: {(Duration.from_msg(feedback.estimated_time_remaining).nanoseconds / 1e9):.0f} seconds")
 
                     if Duration.from_msg(feedback.navigation_time) > Duration(seconds = 30):
                         self.get_logger().info(f"Navigation took too long... cancelling")
@@ -251,7 +244,7 @@ class AutonomousNavigation(Node):
 
                             if self.navigating_to_item:
                                 self.navigating_to_item = False
-                                self.try_pick_up_item()
+                                await self.try_toggle_item()
                                 
 
                             self.get_logger().info(f"Spinning")
@@ -322,8 +315,7 @@ class AutonomousNavigation(Node):
                         case TaskResult.SUCCEEDED:
                             self.get_logger().info(f"Goal succeeded!")
                             if self.holding_item() and not self.navigating_to_item:
-                                self.get_logger().info(f"offloading item")
-                                self.try_offload_item()
+                                await self.try_toggle_item()
                                 self.state = State.SET_GOAL
                                 return
                             self.state = State.SEARCHING
@@ -351,17 +343,13 @@ class AutonomousNavigation(Node):
                     self.get_logger().info(f"items not found, getting random coordinates")
                     random_goal_x = self.x + random.uniform(-5, 5)
                     random_goal_y = self.y + random.uniform(-5, 5)
-                    self.get_logger().info(f"random coordinates: {random_goal_x, random_goal_y}")
                     self.current_goal = Point(x=random_goal_x, y=random_goal_y)
-                    self.get_logger().info(f"calling nav.goToPose")
                     self.navigator.goToPose(self.create_goal_pose(self.current_goal))
-                    self.get_logger().info(f"Setting random goal: ({random_goal_x}, {random_goal_y})")
                     #self.state = State.NAVIGATING
             case _:
                 pass
 
     def holding_item(self):
-        self.get_logger().info(f"item_holders: {self.item_holders.data}")
         for item_holder in self.item_holders.data:
             if item_holder.robot_id == self.robot_id:
                 return item_holder.holding_item
@@ -416,39 +404,27 @@ class AutonomousNavigation(Node):
             10,
             callback_group=subscriber_callback_group)
 
-    def try_pick_up_item(self):
-        rqt = ItemRequest.Request()
-        rqt.robot_id = self.robot_id
+    async def try_toggle_item(self):
+        self.get_logger().info('Attempting to pick up item...')
         try:
-            future = self.pick_up_service.call_async(rqt)
-            self.executor.spin_until_future_complete(future)
-            response = future.result()
-            if response.success:
-                self.get_logger().info('Item picked up.')
+            future = await self.pick_up_service.call_async(self.rqt)
+            #self.executor.spin_until_future_complete(future)
+            response = future
+            retry_count = 0
+            while response is None and retry_count < 5:
+                self.get_logger().info('No response received')
+                retry_count += 1
+                response = future
+            if response is not None and response.success:
+                self.get_logger().info(response.message)
                 self.state = State.SET_GOAL
                 self.items.data = []
             else:
                 self.get_logger().info('Unable to pick up item: ' + response.message)
         except Exception as e:
-            self.get_logger().info('Exception ' + e)  
+            self.get_logger().info(f'Exception {e}')  
     
-    def try_offload_item(self):
-        rqt = ItemRequest.Request()
-        rqt.robot_id = self.robot_id
-        try:
-            future = self.offload_service.call_async(rqt)
-            self.executor.spin_until_future_complete(future)
-            response = future.result()
-            self.get_logger().info(f"response: {response}")
-            if response.success:
-                self.get_logger().info('Item offloaded.')
-
-                self.state = State.SET_GOAL
-                self.items.data = []
-            else:
-                self.get_logger().info('Unable to pick up item: ' + response.message)
-        except Exception as e:
-            self.get_logger().info('Exception ' + e)   
+ 
 
     def create_goal_pose(self, goal):
         goal_pose = PoseStamped()
