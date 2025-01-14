@@ -33,40 +33,23 @@ class State(Enum):
     SET_GOAL = 0
     NAVIGATING = 1
     SPINNING = 2
-    ITEM_HANDLER = 3
+    BACKUP = 3
 
-class RobotController(Node):
+class AutonomousNavigation(Node):
 
     def __init__(self):
-        super().__init__('robot_controller')
+        super().__init__('autonomous_navigation_multithreaded')
 
-        self.state = State.SPINNING
+        self.state = State.SET_GOAL
         self.items = ItemList()
         self.zones = ZoneList()
         self.robots = RobotList()
         self.item_holders = ItemHolders()
         self.OccupancyGrid = OccupancyGrid()
         self.navigating_to_item = False
+        self.navigating_to_zone = False
         self.holding_item = False
-        self.first_run = True
-        self.item_retry_count = 0
 
-        self.zone_goal_index = 0
-        self.zone_goals = []
-        self.current_goal = Point()
-
-        self.zone_goals.append(Point(x = 2.57, y = 2.5))
-        self.zone_goals.append(Point(x = 2.57, y = -2.46))
-        self.zone_goals.append(Point(x = -3.42, y =  2.5))
-        self.zone_goals.append(Point(x = -3.42, y =  -2.46))
-
-        self.navigator = BasicNavigator()
-
-        self.robot_id = self.get_namespace().replace('/', '')
-        self.get_logger().info(f"Robot ID: {self.get_namespace()}")
-
-        self.rqt = ItemRequest.Request()
-        self.rqt.robot_id = self.robot_id
 
         subscriber_callback_group = MutuallyExclusiveCallbackGroup()
         timer_callback_group = MutuallyExclusiveCallbackGroup()
@@ -84,13 +67,31 @@ class RobotController(Node):
         self.declare_parameter('y', 0.0)
         self.declare_parameter('yaw', 0.0)
 
-        self.initial_x = self.get_parameter('x').get_parameter_value().double_value
-        self.initial_y = self.get_parameter('y').get_parameter_value().double_value
-        self.initial_yaw = self.get_parameter('yaw').get_parameter_value().double_value
+        self.x = self.get_parameter('x').value
+        self.y = self.get_parameter('y').value
+        self.distance = 0.0
+        self.angle = self.get_parameter('yaw').value
+        
 
-        self.x = self.initial_x
-        self.y = self.initial_y
-        self.angle = self.initial_yaw
+
+        self.zone_goal_index = 0
+        self.zone_goals = []
+        self.current_goal = Point()
+
+        self.zone_goals.append(Point(x = 0.0, y = 0.0))
+
+        self.zone_goals.append(Point(x = 2.57, y = 2.5))
+        self.zone_goals.append(Point(x = 2.57, y = -2.46))
+        self.zone_goals.append(Point(x = -3.42, y =  2.5))
+        self.zone_goals.append(Point(x = -3.42, y =  -2.46))
+
+        self.navigator = BasicNavigator()
+        
+        self.robot_id = self.get_namespace().replace('/', '')
+        self.get_logger().info(f"Robot ID: {self.get_namespace()}")
+        
+        self.rqt = ItemRequest.Request()
+        self.rqt.robot_id = self.robot_id
 
         initial_pose = PoseStamped()
         initial_pose.pose.position.x = self.x
@@ -107,13 +108,16 @@ class RobotController(Node):
          initial_pose.pose.orientation.w) = quaternion_from_euler(0, 0, math.radians(0), axes='sxyz')
 
         self.navigator.setInitialPose(initial_pose)
+
         self.navigator.waitUntilNav2Active()
 
+        
         self.timer_period = 0.1 # 100 milliseconds = 10 Hz
         self.timer = self.create_timer(self.timer_period, self.control_loop, callback_group=timer_callback_group)
 
         self.previous_time = self.get_clock().now()
         self.get_logger().info(f"Starting control loop")
+
 
     def odom_callback(self, msg):
         #self.get_logger().info(f"odom: ({msg.pose.pose.position.x:.2f}, {msg.pose.pose.position.y:.2f})")
@@ -136,14 +140,16 @@ class RobotController(Node):
                 return    
         self.holding_item = False
 
+    def map_server_callback(self, msg):
+        self.OccupancyGrid = msg
+    
+    #this code from week 5 was making it spin?
     def scan_callback(self, msg):
-            pass
-
+        pass
 
     async def control_loop(self):
-        if self.first_run:
-            self.navigator.spin(spin_dist=math.radians(360), time_allowance=10)
-            self.first_run = False
+        self.get_logger().info(f"Control loop")
+
         try:
             t = self.tf_buffer.lookup_transform(
                 'map',
@@ -160,10 +166,15 @@ class RobotController(Node):
 
             self.distance = math.sqrt(self.x ** 2 + self.y ** 2)
             self.angle = math.atan2(self.y, self.x)
-        except TransformException as e:
-            self.get_logger().info(f"{e}")    
 
-        self.get_logger().info(f"Initial pose - x: {self.initial_x}, y: {self.initial_y}, yaw: {self.initial_yaw}")
+            # self.get_logger().info(f"self.x: {self.x:.2f}")
+            # self.get_logger().info(f"self.y: {self.y:.2f}")
+            # self.get_logger().info(f"yaw (degrees): {math.degrees(yaw):.2f}")
+            # self.get_logger().info(f"distance: {self.distance:.2f}")
+            # self.get_logger().info(f"angle (degrees): {math.degrees(self.angle):.2f}")
+
+        except TransformException as e:
+            self.get_logger().info(f"{e}")
 
         time_difference = self.get_clock().now() - self.previous_time
 
@@ -176,6 +187,7 @@ class RobotController(Node):
         self.get_logger().info(f"State: {self.state}")
 
         match self.state:
+
             case State.SET_GOAL:
                 self.get_logger().info(f"Setting goal...")
                 #if not holding an item, set goal to item
@@ -185,33 +197,24 @@ class RobotController(Node):
                     if len(self.items.data) > 0:
                         self.get_logger().info(f"items found, setting goal...")
                         item = self.items.data[0]
-                        #self.get_logger().info(f"Item: {item}")
-                        theta = math.atan2(item.x, item.y)
-                        #self.get_logger().info(f"Theta: {theta:.2f}")
-                        estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
-                        goal_x = self.x + (estimated_distance * math.sin(theta))
-                        goal_y = self.y + (estimated_distance * math.cos(theta))
-                        #self.get_logger().info(f"sin: {math.sin(theta):.2f}, cos: {math.cos(theta):.2f}")
-                        # self.get_logger().info(f"Estimated distance: {estimated_distance:.2f}")
-                        # self.get_logger().info(f"Goal: ({goal_x:.2f}, {goal_y:.2f})")
-                        # self.get_logger().info(f"Self: ({self.x:.2f}, {self.y:.2f})")
-                        self.current_goal = Point(x = goal_x, y = goal_y)
-                        #self.get_logger().info(f"Current goal: {self.current_goal}")
-                        self.navigating_to_item = True  
+                        self.current_goal = Point(x = item.x + self.x, y = item.y + self.y)
+                        self.navigating_to_item = True
                     else:
                         self.get_logger().info(f"items not found, getting random coordinate...")
                         random_goal_x = self.x + random.uniform(-5, 5)
                         random_goal_y = self.y + random.uniform(-5, 5)
                         self.current_goal = Point(x=random_goal_x, y=random_goal_y)
+                        
                 
                 #if holding an item, set goal to zone
                 #if no zones, spin
-                elif self.holding_item:
+                else:
                     if len(self.zone_goals) == 0:
                         self.state = State.SPINNING
                         return
-                    self.get_logger().info(f"Setting goal to zone...")
-                    self.current_goal = self.pick_zone()
+
+                    self.current_goal = self.pick_zone
+                    self.navigating_to_zone = True
                 
                 goal_pose = self.create_goal_pose(self.current_goal)
                 
@@ -220,13 +223,23 @@ class RobotController(Node):
                 self.navigator.goToPose(goal_pose)
                 self.state = State.NAVIGATING
 
-
             case State.NAVIGATING:
-                self.get_logger().info(f"Navigating...")
-                #if not holding an item or navigating to and item, set goal to item
+                #if not holding item, and items are found, set new goal
                 if not self.holding_item and len(self.items.data) > 0 and not self.navigating_to_item:
-                    if len(self.items.data) > 0:
+                    #if len(self.items.data) > 0:
                         self.state = State.SET_GOAL
+                        # item = self.items.data[0]
+                        # estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
+                        # #if not self.navigating_to_item:
+                        # theta = math.atan2(item.y, item.x)
+                        # self.get_logger().info(f"theta: {theta}, yaw: {self.angle}")
+                        # x_item = self.x + estimated_distance * math.cos(theta)
+                        # y_item = self.y + estimated_distance * math.sin(theta)
+                        # self.current_goal = Point(x = x_item, y = y_item)
+                        # self.navigator.goToPose(self.create_goal_pose(self.current_goal))
+                        # self.navigating_to_item = True
+                    
+
                 if not self.navigator.isTaskComplete():
 
                     feedback = self.navigator.getFeedback()
@@ -244,39 +257,41 @@ class RobotController(Node):
 
                         case TaskResult.SUCCEEDED:
                             self.get_logger().info(f"Goal succeeded!")
-                            #if holding an item, offload item
-                            #if not holding an item, pick up item
-                            if self.navigating_to_item or self.holding_item:
-                                self.state = State.ITEM_HANDLER
+
+                            if self.navigating_to_item or self.navigating_to_zone:
+                                await self.try_toggle_item()
                             else:
-                                #if not holding an item, set goal to item
                                 self.state = State.SET_GOAL
 
-                            #self.get_logger().info(f"Spinning")
+                            self.get_logger().info(f"Spinning")
 
-                            #self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
-                            #self.state = State.SPINNING
+                            self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
+                            self.state = State.SPINNING
 
                         case TaskResult.CANCELED:
                             self.get_logger().info(f"Goal was canceled!")
                             
                             self.state = State.SET_GOAL
                             self.navigating_to_item = False
+                            self.navigating_to_zone = False
 
                         case TaskResult.FAILED:
                             self.get_logger().info(f"Goal failed!")
 
                             self.state = State.SET_GOAL
                             self.navigating_to_item = False
+                            self.navigating_to_zone = False
 
                         case _:
                             self.get_logger().info(f"Goal has an invalid return status!")
 
             case State.SPINNING:
-                self.get_logger().info(f"Spinning...")
+
                 if not self.navigator.isTaskComplete():
+
                     feedback = self.navigator.getFeedback()
                     self.get_logger().info(f"Turned: {math.degrees(feedback.angular_distance_traveled):.2f} degrees")
+
                 else:
 
                     result = self.navigator.getResult()
@@ -284,56 +299,61 @@ class RobotController(Node):
                     match result:
 
                         case TaskResult.SUCCEEDED:
-                            self.get_logger().info(f"Spin completed!")
-                            self.state = State.SET_GOAL
+                            self.get_logger().info(f"Goal succeeded!")
+
+                            self.get_logger().info(f"Backing up")
+
+                            self.navigator.backup(backup_dist=0.05, backup_speed=0.025, time_allowance=5)
+                            self.state = State.BACKUP
 
                         case TaskResult.CANCELED:
-                            self.get_logger().info(f"Spin was canceled!")
+                            self.get_logger().info(f"Goal was canceled!")
 
                             self.state = State.SET_GOAL
 
                         case TaskResult.FAILED:
-                            self.get_logger().info(f"Spin failed!")
+                            self.get_logger().info(f"Goal failed!")
 
                             self.state = State.SET_GOAL
 
                         case _:
-                            self.get_logger().info(f"Spin has an invalid return status!")
+                            self.get_logger().info(f"Goal has an invalid return status!")
 
-            case State.ITEM_HANDLER:
-                self.get_logger().info(f"Item handler...")
+            case State.BACKUP:
 
-                try:
-                    if self.holding_item:
-                        future = await self.offload_service.call_async(self.rqt)
-                    else:
-                        future = await self.pick_up_service.call_async(self.rqt)
-                    #self.executor.spin_until_future_complete(future)
-                    response = future
-                    
-                    if response is None and self.item_retry_count < 5:
-                        self.get_logger().info('No response received')
-                        self.item_retry_count += 1
-                        response = future
-                    if response is not None and response.success:
-                        self.get_logger().info(response.message)
-                        self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
-                        self.state = State.SPINNING
-                        self.item_retry_count = 0
-                        self.items.data = []
-                        self.navigating_to_item = False
-                    else:
-                        self.get_logger().info(response.message)
-                        self.state = State.SET_GOAL
-                        self.item_retry_count = 0
-                except Exception as e:
-                    self.get_logger().info(f'Exception {e}')  
-    
+                if not self.navigator.isTaskComplete():
+
+                    feedback = self.navigator.getFeedback()
+                    self.get_logger().info(f"Distance travelled: {feedback.distance_traveled:.2f} metres")
+
+                else:
+
+                    result = self.navigator.getResult()
+
+                    match result:
+
+                        case TaskResult.SUCCEEDED:
+                            self.get_logger().info(f"Goal succeeded!")
+                            self.state = State.SET_GOAL
+
+                        case TaskResult.CANCELED:
+                            self.get_logger().info(f"Goal was canceled!")
+
+                            self.state = State.SET_GOAL
+
+                        case TaskResult.FAILED:
+                            self.get_logger().info(f"Goal failed!")
+
+                            self.state = State.SET_GOAL
+
+                        case _:
+                            self.get_logger().info(f"Goal has an invalid return status!")
+
                 
             case _:
                 pass
 
-
+      
     def setup_subscribers(self, subscriber_callback_group):
         self.odom_subscriber = self.create_subscription(
             Odometry,
@@ -376,8 +396,41 @@ class RobotController(Node):
             10, callback_group=subscriber_callback_group
         )
 
+        self.costmap_subscriber = self.create_subscription(
+            OccupancyGrid,
+            'global_costmap/costmap',
+            self.map_server_callback,
+            10,
+            callback_group=subscriber_callback_group)
+
     def pick_zone(self):
-        return self.zone_goals[random.randint(0, len(self.zone_goals) - 1)] 
+        return self.zone_goals[random.randint(0, len(self.zone_goals) - 1)]    
+
+    async def try_toggle_item(self):
+        self.get_logger().info('Attempting to toggle item...')
+        try:
+            if self.holding_item:
+                future = await self.offload_service.call_async(self.rqt)
+            else:
+                future = await self.pick_up_service.call_async(self.rqt)
+            #self.executor.spin_until_future_complete(future)
+            response = future
+            retry_count = 0
+            while response is None and retry_count < 5:
+                self.get_logger().info('No response received')
+                retry_count += 1
+                response = future
+            if response is not None and response.success:
+                self.get_logger().info(response.message)
+                self.state = State.SET_GOAL
+                self.items.data = []
+                self.navigating_to_item = False
+                self.navigating_to_zone = False
+            else:
+                self.get_logger().info('Unable to pick up item: ' + response.message)
+        except Exception as e:
+            self.get_logger().info(f'Exception {e}')  
+    
 
     def create_goal_pose(self, goal):
         goal_pose = PoseStamped()
@@ -394,27 +447,30 @@ class RobotController(Node):
 
         self.get_logger().info(f"Goal pose: {goal_pose}")
         return goal_pose
-   
+    
     def destroy_node(self):
         self.get_logger().info(f"Shutting down")
         self.navigator.lifecycleShutdown()
         self.navigator.destroyNode()
         super().destroy_node()
-
+        
 
 def main(args=None):
 
     rclpy.init(args = args)
 
-    node = RobotController()
+    node = AutonomousNavigation()
+
     executor = MultiThreadedExecutor()
     executor.add_node(node)
 
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
+        node.get_logger().info('KeyboardInterrupt')
         pass
     except ExternalShutdownException:
+        node.get_logger().info('ExternalShutdownException')
         sys.exit(1)
     except Exception as e:
         node.get_logger().info(f'Exception: {e}')
