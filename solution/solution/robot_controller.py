@@ -26,6 +26,7 @@ import angles
 
 from assessment_interfaces.msg import Item, ItemList, Zone, ZoneList, Robot, RobotList, ItemHolder, ItemHolders, ItemLog
 from auro_interfaces.srv import ItemRequest
+from solution_interfaces.msg import ItemZone, ItemZones
 
 from enum import Enum
 
@@ -35,15 +36,6 @@ class State(Enum):
     SPINNING = 2
     ITEM_HANDLER = 3
 
-class ItemZone:
-    def __init__(self, item_colour='', zone=0, zone_x=0, zone_y=0):
-        self.item_colour = item_colour
-        self.zone = zone
-        self.zone_x = zone_x
-        self.zone_y = zone_y
-
-    def __repr__(self):
-        return f"ItemZone(item_colour={self.item_colour}, zone={self.zone}, zone_x={self.zone_x}, zone_y={self.zone_y})"
     
 
 class RobotController(Node):
@@ -58,9 +50,11 @@ class RobotController(Node):
         self.item_holders = ItemHolders()
         self.OccupancyGrid = OccupancyGrid()
         self.navigating_to_item = False
-        self.holding_item = False
+        self.item_holder = ItemHolder()
         self.first_run = True
         self.item_retry_count = 0
+        self.zone = Zone()
+        self.item_zones = ItemZones()
 
         self.zone_goal_index = 0
         self.zone_goals = []
@@ -146,9 +140,9 @@ class RobotController(Node):
         self.item_holders = msg
         for item_holder in self.item_holders.data:
             if item_holder.robot_id == self.robot_id:
-                self.holding_item = item_holder.holding_item
+                self.item_holder = item_holder
                 return    
-        self.holding_item = False
+
     
     def item_zones_callback(self, msg):
         self.item_zones = msg
@@ -197,8 +191,8 @@ class RobotController(Node):
                 self.get_logger().info(f"Setting goal...")
                 #if not holding an item, set goal to item
                 #if no items found, set goal to random coordinates
-                self.get_logger().info(f"holding_item: {self.holding_item}")
-                if not self.holding_item:
+                self.get_logger().info(f"holding_item: {self.item_holder.holding_item}")
+                if not self.item_holder.holding_item:
                     if len(self.items.data) > 0:
                         self.get_logger().info(f"items found, setting goal...")
                         item = self.items.data[0]
@@ -223,7 +217,7 @@ class RobotController(Node):
                 
                 #if holding an item, set goal to zone
                 #if no zones, spin
-                elif self.holding_item:
+                elif self.item_holder.holding_item:
                     if len(self.zone_goals) == 0:
                         self.state = State.SPINNING
                         return
@@ -241,9 +235,11 @@ class RobotController(Node):
             case State.NAVIGATING:
                 self.get_logger().info(f"Navigating...")
                 #if not holding an item or navigating to and item, set goal to item
-                if not self.holding_item and len(self.items.data) > 0 and not self.navigating_to_item:
+                if not self.item_holder.holding_item and len(self.items.data) > 0 and not self.navigating_to_item:
                     if len(self.items.data) > 0:
                         self.state = State.SET_GOAL
+                if self.item_holder.holding_item and len(self.zones.data) > 0:
+                    self.zone = self.zones.data[0]
                 if not self.navigator.isTaskComplete():
 
                     feedback = self.navigator.getFeedback()
@@ -263,7 +259,7 @@ class RobotController(Node):
                             self.get_logger().info(f"Goal succeeded!")
                             #if holding an item, offload item
                             #if not holding an item, pick up item
-                            if self.navigating_to_item or self.holding_item:
+                            if self.navigating_to_item or self.item_holder.holding_item:
                                 self.state = State.ITEM_HANDLER
                             else:
                                 #if not holding an item, set goal to item
@@ -321,7 +317,7 @@ class RobotController(Node):
                 self.get_logger().info(f"Item handler...")
 
                 try:
-                    if self.holding_item:
+                    if self.item_holder.holding_item:
                         future = await self.offload_service.call_async(self.rqt)
                     else:
                         future = await self.pick_up_service.call_async(self.rqt)
@@ -338,6 +334,9 @@ class RobotController(Node):
                         self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
                         self.state = State.SPINNING
                         self.item_retry_count = 0
+                        if self.navigating_to_item:
+                            self.update_item_zones()
+                            self.item_zones_publisher.publish(self.item_zones)
                         #self.items.data = []
                         self.navigating_to_item = False
                         return 
@@ -417,7 +416,37 @@ class RobotController(Node):
         )
 
     def pick_zone(self):
-        return self.zone_goals[random.randint(0, len(self.zone_goals) - 1)] 
+        self.get_logger.info("picking zone...")
+        self.get_logger.info(f"zone list: {self.item_zones.data}")
+        self.get_logger.info(f"item holder: {self.item_holder}")
+        for zone in self.item_zones.data:
+            if self.item_holder.item_colour == zone.item_colour:
+                return Point(x= zone.zone_x, y= zone.zone_y)
+            
+        closest_zone = self.zone_goals[0]
+        shortest_distance = math.sqrt((closest_zone.x-self.x)**2, (closest_zone.y-self.y)**2)
+        for zone in self.zone_goals:
+            new_distance = math.sqrt((zone.x-self.x)**2, (zone.y-self.y)**2)
+            if new_distance < shortest_distance:
+                closest_zone = zone
+                shortest_distance = new_distance
+        return closest_zone
+    
+    def update_item_zones(self):
+        for item_zone in self.item_zones.data:
+            if item_zone.item_colour == self.item_holder.item_colour:
+                item_zone.x = self.zone.x
+                item_zone.y = self.zone.y
+                item_zone.zone = self.zone.zone
+                return
+        self.item_zones.data.append(ItemZone(
+            item_colour = self.item_holder.item_colour, 
+            zone_y = self.zone.y, 
+            zone_x = self.zone.x,
+            zone = self.zone.zone))
+        
+        self.zone_goals.remove(Point(self.zone.x, self.zone.y))
+
 
     def create_goal_pose(self, goal):
         goal_pose = PoseStamped()
