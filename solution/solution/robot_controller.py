@@ -35,6 +35,17 @@ class State(Enum):
     SPINNING = 2
     ITEM_HANDLER = 3
 
+class ItemZone:
+    def __init__(self, item_colour='', zone=0, zone_x=0, zone_y=0):
+        self.item_colour = item_colour
+        self.zone = zone
+        self.zone_x = zone_x
+        self.zone_y = zone_y
+
+    def __repr__(self):
+        return f"ItemZone(item_colour={self.item_colour}, zone={self.zone}, zone_x={self.zone_x}, zone_y={self.zone_y})"
+    
+
 class RobotController(Node):
 
     def __init__(self):
@@ -69,6 +80,7 @@ class RobotController(Node):
         self.rqt.robot_id = self.robot_id
 
         subscriber_callback_group = MutuallyExclusiveCallbackGroup()
+        publisher_callback_group = MutuallyExclusiveCallbackGroup()
         timer_callback_group = MutuallyExclusiveCallbackGroup()
         client_callback_group = MutuallyExclusiveCallbackGroup()
 
@@ -76,6 +88,8 @@ class RobotController(Node):
     
         self.pick_up_service = self.create_client(ItemRequest, '/pick_up_item', callback_group=client_callback_group)
         self.offload_service = self.create_client(ItemRequest, '/offload_item', callback_group=client_callback_group)
+
+        self.zone_item_publisher = self.create_publisher(ItemZones, '/item_zones', 10, callback_group=publisher_callback_group)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -135,6 +149,9 @@ class RobotController(Node):
                 self.holding_item = item_holder.holding_item
                 return    
         self.holding_item = False
+    
+    def item_zones_callback(self, msg):
+        self.item_zones = msg
 
     def scan_callback(self, msg):
             pass
@@ -308,28 +325,44 @@ class RobotController(Node):
                         future = await self.offload_service.call_async(self.rqt)
                     else:
                         future = await self.pick_up_service.call_async(self.rqt)
-                    #self.executor.spin_until_future_complete(future)
+    
                     response = future
-                    
-                    if response is None and self.item_retry_count < 5:
-                        self.get_logger().info('No response received')
-                        self.item_retry_count += 1
-                        response = future
-                    if response is not None and response.success:
+
+                    if response is None:
+                        if self.item_retry_count < 5:
+                            self.get_logger().info('No response received, retrying...')
+                            self.item_retry_count += 1
+                            return
+                    elif response.success:
                         self.get_logger().info(response.message)
                         self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
                         self.state = State.SPINNING
                         self.item_retry_count = 0
-                        self.items.data = []
+                        #self.items.data = []
                         self.navigating_to_item = False
-                    else:
-                        self.get_logger().info(response.message)
-                        self.state = State.SET_GOAL
-                        self.item_retry_count = 0
+                        return 
+                    
+                    self.get_logger().info(response.message)
+                    self.state = State.SET_GOAL
+                    self.item_retry_count = 0
+
+                    # if response is None and self.item_retry_count < 5:
+                    #     self.get_logger().info('No response received')
+                    #     self.item_retry_count += 1
+                    # elif response is not None and response.success:
+                    #     self.get_logger().info(response.message)
+                    #     self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
+                    #     self.state = State.SPINNING
+                    #     self.item_retry_count = 0
+                    #     self.items.data = []
+                    #     self.navigating_to_item = False
+                    # else:
+                    #     self.get_logger().info(response.message)
+                    #     self.state = State.SET_GOAL
+                    #     self.item_retry_count = 0
                 except Exception as e:
                     self.get_logger().info(f'Exception {e}')  
     
-                
             case _:
                 pass
 
@@ -373,6 +406,13 @@ class RobotController(Node):
             ItemHolders,
             '/item_holders',
             self.item_holders_callback,
+            10, callback_group=subscriber_callback_group
+        )
+
+        self.item__zones_subscriber = self.create_subscription(
+            ItemZones,
+            '/item_zones',
+            self.item_callback,
             10, callback_group=subscriber_callback_group
         )
 
