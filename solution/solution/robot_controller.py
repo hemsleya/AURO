@@ -11,7 +11,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.duration import Duration
 from rclpy.qos import QoSPresetProfiles
 
-from geometry_msgs.msg import PoseStamped, Point, Twist
+from geometry_msgs.msg import PoseStamped, Point, Twist,PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, OccupancyGrid
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from sensor_msgs.msg import LaserScan
@@ -113,6 +113,8 @@ class RobotController(Node):
          initial_pose.pose.orientation.y,
          initial_pose.pose.orientation.z,
          initial_pose.pose.orientation.w) = quaternion_from_euler(0, 0, math.radians(0), axes='sxyz')
+        
+        self.current_pose = initial_pose
 
         self.navigator.setInitialPose(initial_pose)
         self.navigator.waitUntilNav2Active()
@@ -125,7 +127,20 @@ class RobotController(Node):
 
     def odom_callback(self, msg):
         #self.get_logger().info(f"odom: ({msg.pose.pose.position.x:.2f}, {msg.pose.pose.position.y:.2f})")
-        pass
+        self.current_pose = msg.pose
+
+    # def true_pose_callback(self, msg):
+    #     pose = msg.pose.pose
+    #     self.x = pose.x
+    #     self.y = pose.y
+    #     self.angle = pose.yaw
+    #     self.get_logger().info(f"set new pose: {pose}")
+
+    #     pose_stamped = PoseStamped()
+    #     pose_stamped.header.stamp = self.get_clock().now().to_msg()
+    #     pose_stamped.pose = pose
+
+       
 
     def item_callback(self, msg):
         self.items = msg
@@ -171,10 +186,11 @@ class RobotController(Node):
 
             self.distance = math.sqrt(self.x ** 2 + self.y ** 2)
             self.angle = math.atan2(self.y, self.x)
+           # self.get_logger().info(f"x, y: {self.x, self.y}")
         except TransformException as e:
             self.get_logger().info(f"{e}")    
 
-        self.get_logger().info(f"Initial pose - x: {self.initial_x}, y: {self.initial_y}, yaw: {self.initial_yaw}")
+       # self.get_logger().info(f"Initial pose - x: {self.initial_x}, y: {self.initial_y}, yaw: {self.initial_yaw}")
 
         time_difference = self.get_clock().now() - self.previous_time
 
@@ -184,19 +200,19 @@ class RobotController(Node):
             self.get_logger().info(f"SPINNING...")
             self.state = State.SPINNING
 
-        self.get_logger().info(f"State: {self.state}")
+        #self.get_logger().info(f"State: {self.state}")
 
         match self.state:
             case State.SET_GOAL:
                 self.get_logger().info(f"Setting goal...")
                 #if not holding an item, set goal to item
                 #if no items found, set goal to random coordinates
-                self.get_logger().info(f"holding_item: {self.item_holder.holding_item}")
+                #self.get_logger().info(f"holding_item: {self.item_holder.holding_item}")
                 if not self.item_holder.holding_item:
                     if len(self.items.data) > 0:
                         self.get_logger().info(f"items found, setting goal...")
                         item = self.items.data[0]
-                        #self.get_logger().info(f"Item: {item}")
+                        self.get_logger().info(f"Item: {item}")
                         theta = math.atan2(item.x, item.y)
                         #self.get_logger().info(f"Theta: {theta:.2f}")
                         estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
@@ -211,8 +227,8 @@ class RobotController(Node):
                         self.navigating_to_item = True  
                     else:
                         self.get_logger().info(f"items not found, getting random coordinate...")
-                        random_goal_x = self.x + random.uniform(-5, 5)
-                        random_goal_y = self.y + random.uniform(-5, 5)
+                        random_goal_x = self.current_pose.pose.position.x + random.uniform(-5, 5)
+                        random_goal_y = self.current_pose.pose.position.y + random.uniform(-5, 5)
                         self.current_goal = Point(x=random_goal_x, y=random_goal_y)
                 
                 #if holding an item, set goal to zone
@@ -226,7 +242,7 @@ class RobotController(Node):
                 
                 goal_pose = self.create_goal_pose(self.current_goal)
                 
-                self.get_logger().info(f"Navigating to: ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f})")
+                #self.get_logger().info(f"Navigating to: ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f})")
 
                 self.navigator.goToPose(goal_pose)
                 self.state = State.NAVIGATING
@@ -238,6 +254,7 @@ class RobotController(Node):
                 if not self.item_holder.holding_item and len(self.items.data) > 0 and not self.navigating_to_item:
                     if len(self.items.data) > 0:
                         self.state = State.SET_GOAL
+                        self.navigator.cancelTask()
                 if self.item_holder.holding_item and len(self.zones.data) > 0:
                     self.zone = self.zones.data[0]
                 if not self.navigator.isTaskComplete():
@@ -289,7 +306,7 @@ class RobotController(Node):
                 self.get_logger().info(f"Spinning...")
                 if not self.navigator.isTaskComplete():
                     feedback = self.navigator.getFeedback()
-                    self.get_logger().info(f"Turned: {math.degrees(feedback.angular_distance_traveled):.2f} degrees")
+                   # self.get_logger().info(f"Turned: {math.degrees(feedback.angular_distance_traveled):.2f} degrees")
                 else:
 
                     result = self.navigator.getResult()
@@ -315,9 +332,11 @@ class RobotController(Node):
 
             case State.ITEM_HANDLER:
                 self.get_logger().info(f"Item handler...")
-
+                #todo: save item held to add to data if successful
+                temp_item_data = self.item_holder
                 try:
                     if self.item_holder.holding_item:
+
                         future = await self.offload_service.call_async(self.rqt)
                     else:
                         future = await self.pick_up_service.call_async(self.rqt)
@@ -330,12 +349,12 @@ class RobotController(Node):
                             self.item_retry_count += 1
                             return
                     elif response.success:
-                        self.get_logger().info(response.message)
+                        self.get_logger().info(response.message) #Robot 'robot1' collected item successfully
                         self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
                         self.state = State.SPINNING
                         self.item_retry_count = 0
-                        if self.navigating_to_item:
-                            self.update_item_zones()
+                        if not self.navigating_to_item:
+                            self.update_item_zones(temp_item_data)
                             self.item_zones_publisher.publish(self.item_zones)
                         #self.items.data = []
                         self.navigating_to_item = False
@@ -368,8 +387,8 @@ class RobotController(Node):
 
     def setup_subscribers(self, subscriber_callback_group):
         self.odom_subscriber = self.create_subscription(
-            Odometry,
-            'odom',
+            PoseWithCovarianceStamped,
+            'amcl_pose',
             self.odom_callback,
             10,
             callback_group=subscriber_callback_group)
@@ -415,37 +434,44 @@ class RobotController(Node):
             10, callback_group=subscriber_callback_group
         )
 
+        # self.true_pose_subscriber = self.create_subscription(
+        #     Odometry,
+        #     '/world',
+        #     self.true_pose_callback,
+        #     10, callback_group=subscriber_callback_group)
+
     def pick_zone(self):
-        self.get_logger.info("picking zone...")
-        self.get_logger.info(f"zone list: {self.item_zones.data}")
-        self.get_logger.info(f"item holder: {self.item_holder}")
+        self.get_logger().info("picking zone...")
+        self.get_logger().info(f"zone list: {self.item_zones.data}")
+        self.get_logger().info(f"item holder: {self.item_holder}")
         for zone in self.item_zones.data:
             if self.item_holder.item_colour == zone.item_colour:
-                return Point(x= zone.zone_x, y= zone.zone_y)
+                return Point(x= float(zone.zone_x), y= float(zone.zone_y))
             
-        closest_zone = self.zone_goals[0]
-        shortest_distance = math.sqrt((closest_zone.x-self.x)**2, (closest_zone.y-self.y)**2)
-        for zone in self.zone_goals:
-            new_distance = math.sqrt((zone.x-self.x)**2, (zone.y-self.y)**2)
-            if new_distance < shortest_distance:
-                closest_zone = zone
-                shortest_distance = new_distance
-        return closest_zone
+        # closest_zone = self.zone_goals[0]
+        # shortest_distance = math.sqrt((closest_zone.x-self.x)**2, (closest_zone.y-self.y)**2)
+        # for zone in self.zone_goals:
+        #     new_distance = math.sqrt((zone.x-self.x)**2, (zone.y-self.y)**2)
+        #     if new_distance < shortest_distance:
+        #         closest_zone = zone
+        #         shortest_distance = new_distance
+        # return closest_zone
+        return self.zone_goals[random.randint(0, len(self.zone_goals) - 1)]  
     
-    def update_item_zones(self):
+    def update_item_zones(self, item_holder):
         for item_zone in self.item_zones.data:
-            if item_zone.item_colour == self.item_holder.item_colour:
-                item_zone.x = self.zone.x
-                item_zone.y = self.zone.y
+            if item_zone.item_colour == item_holder.item_colour:
+                item_zone.x = self.current_pose.position.x
+                item_zone.y = self.current_pose.position.y
                 item_zone.zone = self.zone.zone
                 return
         self.item_zones.data.append(ItemZone(
-            item_colour = self.item_holder.item_colour, 
-            zone_y = self.zone.y, 
-            zone_x = self.zone.x,
+            item_colour = item_holder.item_colour, 
+            zone_y = self.current_pose.position.y, 
+            zone_x = self.current_pose.position.x,
             zone = self.zone.zone))
         
-        self.zone_goals.remove(Point(self.zone.x, self.zone.y))
+        #self.zone_goals.remove(Point(self.zone.x, self.zone.y))
 
 
     def create_goal_pose(self, goal):

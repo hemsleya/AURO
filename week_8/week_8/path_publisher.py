@@ -73,7 +73,7 @@ class PathPublisher(Node):
 
         self.odom_path_publisher.publish(path)
 
-
+#map to world conversion maybe IMPORTANT
     def true_pose_callback(self, msg):
         pose = msg.pose.pose
 
