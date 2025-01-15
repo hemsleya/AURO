@@ -36,12 +36,17 @@ class State(Enum):
     SPINNING = 2
     ITEM_HANDLER = 3
 
+
     
 
 class RobotController(Node):
 
     def __init__(self):
         super().__init__('robot_controller')
+        self.min_x = -3.5
+        self.max_x = 2.6
+        self.min_y = -2.5
+        self.max_y = 2.5
 
         self.state = State.SPINNING
         self.items = ItemList()
@@ -216,11 +221,11 @@ class RobotController(Node):
                         theta = math.atan2(item.x, item.y)
                         #self.get_logger().info(f"Theta: {theta:.2f}")
                         estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
-                        goal_x = self.x + (estimated_distance * math.sin(theta))
-                        goal_y = self.y + (estimated_distance * math.cos(theta))
+                        goal_x = self.current_pose.pose.position.x + (estimated_distance * math.sin(theta))
+                        goal_y = self.current_pose.pose.position.y + (estimated_distance * math.cos(theta))
                         #self.get_logger().info(f"sin: {math.sin(theta):.2f}, cos: {math.cos(theta):.2f}")
                         # self.get_logger().info(f"Estimated distance: {estimated_distance:.2f}")
-                        # self.get_logger().info(f"Goal: ({goal_x:.2f}, {goal_y:.2f})")
+                        self.get_logger().info(f"Goal: ({goal_x:.2f}, {goal_y:.2f})")
                         # self.get_logger().info(f"Self: ({self.x:.2f}, {self.y:.2f})")
                         self.current_goal = Point(x = goal_x, y = goal_y)
                         #self.get_logger().info(f"Current goal: {self.current_goal}")
@@ -230,6 +235,7 @@ class RobotController(Node):
                         random_goal_x = self.current_pose.pose.position.x + random.uniform(-5, 5)
                         random_goal_y = self.current_pose.pose.position.y + random.uniform(-5, 5)
                         self.current_goal = Point(x=random_goal_x, y=random_goal_y)
+                        self.get_logger().info(f"Goal: ({random_goal_x:.2f}, {random_goal_y:.2f})")
                 
                 #if holding an item, set goal to zone
                 #if no zones, spin
@@ -240,6 +246,10 @@ class RobotController(Node):
                     self.get_logger().info(f"Setting goal to zone...")
                     self.current_goal = self.pick_zone()
                 
+                if not(self.current_goal.x <= self.max_x and self.current_goal.x >= self.min_x) or not(self.current_goal.y <= self.max_y and self.current_goal.x >= self.min_y):
+                    self.navigator.spin(spin_dist=math.radians(45), time_allowance=10)
+                    self.state = State.SPINNING
+                    return
                 goal_pose = self.create_goal_pose(self.current_goal)
                 
                 #self.get_logger().info(f"Navigating to: ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f})")
@@ -349,7 +359,7 @@ class RobotController(Node):
                             self.item_retry_count += 1
                             return
                     elif response.success:
-                        self.get_logger().info(response.message) #Robot 'robot1' collected item successfully
+                        self.get_logger().info(response.message) #Robot 'robot1' collected/offloaded item successfully
                         self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
                         self.state = State.SPINNING
                         self.item_retry_count = 0
@@ -461,14 +471,14 @@ class RobotController(Node):
     def update_item_zones(self, item_holder):
         for item_zone in self.item_zones.data:
             if item_zone.item_colour == item_holder.item_colour:
-                item_zone.x = self.current_pose.position.x
-                item_zone.y = self.current_pose.position.y
+                item_zone.x = self.current_pose.pose.position.x
+                item_zone.y = self.current_pose.pose.position.y
                 item_zone.zone = self.zone.zone
                 return
         self.item_zones.data.append(ItemZone(
             item_colour = item_holder.item_colour, 
-            zone_y = self.current_pose.position.y, 
-            zone_x = self.current_pose.position.x,
+            zone_y = self.current_pose.pose.position.y, 
+            zone_x = self.current_pose.pose.position.x,
             zone = self.zone.zone))
         
         #self.zone_goals.remove(Point(self.zone.x, self.zone.y))
