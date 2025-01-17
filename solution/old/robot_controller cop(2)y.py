@@ -43,10 +43,10 @@ class RobotController(Node):
 
     def __init__(self):
         super().__init__('robot_controller')
-        self.min_x = -3.5
-        self.max_x = 2.6
-        self.min_y = -2.5
-        self.max_y = 2.5
+        self.min_x = -4
+        self.max_x = 3
+        self.min_y = -3
+        self.max_y = 3
 
         self.state = State.SPINNING
         self.items = ItemList()
@@ -88,7 +88,7 @@ class RobotController(Node):
         self.pick_up_service = self.create_client(ItemRequest, '/pick_up_item', callback_group=client_callback_group)
         self.offload_service = self.create_client(ItemRequest, '/offload_item', callback_group=client_callback_group)
 
-        self.zone_item_publisher = self.create_publisher(ItemZones, '/item_zones', 10, callback_group=publisher_callback_group)
+        self.item_zones_publisher = self.create_publisher(ItemZones, '/item_zones', 10, callback_group=publisher_callback_group)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -133,13 +133,17 @@ class RobotController(Node):
     def odom_callback(self, msg):
         #self.get_logger().info(f"odom: ({msg.pose.pose.position.x:.2f}, {msg.pose.pose.position.y:.2f})")
         self.current_pose = msg.pose
-        (_, _, self.angle) = euler_from_quaternion([msg.pose.pose.orientation.x,
+        (_, _, yaw) = euler_from_quaternion([msg.pose.pose.orientation.x,
                                                         msg.pose.pose.orientation.y,
                                                         msg.pose.pose.orientation.z,
                                                         msg.pose.pose.orientation.w])
+        self.angle = yaw
+
     # def true_pose_callback(self, msg):
+    #     pose = msg.pose.pose
     #     self.x = pose.x
     #     self.y = pose.y
+    #     self.angle = pose.yaw
     #     self.get_logger().info(f"set new pose: {pose}")
 
     #     pose_stamped = PoseStamped()
@@ -191,51 +195,42 @@ class RobotController(Node):
                                                         t.transform.rotation.w])
 
             self.distance = math.sqrt(self.x ** 2 + self.y ** 2)
-            #self.angle = math.atan2(self.y, self.x) # angle from x axis
+           # self.angle = math.atan2(self.y, self.x)
            # self.get_logger().info(f"x, y: {self.x, self.y}")
         except TransformException as e:
             self.get_logger().info(f"{e}")    
-
-       # self.get_logger().info(f"Initial pose - x: {self.initial_x}, y: {self.initial_y}, yaw: {self.initial_yaw}")
 
         time_difference = self.get_clock().now() - self.previous_time
 
         if time_difference > Duration(seconds = 300):
             self.navigator.cancelTask()
             self.previous_time = self.get_clock().now()
-            self.get_logger().info(f"SPINNING...")
             self.state = State.SPINNING
 
-        #self.get_logger().info(f"State: {self.state}")
 
         match self.state:
             case State.SET_GOAL:
                 #if not holding an item, set goal to item
                 #if no items found, set goal to random coordinates
-                #self.get_logger().info(f"holding_item: {self.item_holder.holding_item}")
                 if not self.item_holder.holding_item:
                     if len(self.items.data) > 0:
                         self.get_logger().info(f"items found, setting goal...")
-                        self.get_logger().info(f"items: {self.items}")
                         item = self.items.data[0]
-                        self.get_logger().info(f"Item: {item}")
-                        theta = math.atan2(item.x, item.y)
-                        self.get_logger().info(f"Theta: {math.degrees(theta):.2f}")
-                        self.get_logger().info(f"current angle: {math.degrees(self.angle)}")
+                        self.get_logger().info(f"Item x,y: {item.x, item.y}")
+                        angle = math.atan2(item.y, item.x)
+                        self.get_logger().info(f"angle: {math.degrees(angle)}, self.angle: {math.degrees(self.angle)}")
+                        theta = angle + self.angle
+                        self.get_logger().info(f"theta: {theta}")
                         estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
-                        goal_x = self.current_pose.pose.position.x + (estimated_distance * math.cos(theta+self.angle))
-                        goal_y = self.current_pose.pose.position.y + (estimated_distance * math.sin(theta+self.angle))
-                        #self.get_logger().info(f"sin: {math.sin(theta):.2f}, cos: {math.cos(theta):.2f}")
-                        # self.get_logger().info(f"Estimated distance: {estimated_distance:.2f}")
+                        goal_x = self.current_pose.pose.position.x + (estimated_distance * math.cos(theta))
+                        goal_y = self.current_pose.pose.position.y + (estimated_distance * math.sin(theta))
                         self.get_logger().info(f"Goal: ({goal_x:.2f}, {goal_y:.2f})")
-                        # self.get_logger().info(f"Self: ({self.x:.2f}, {self.y:.2f})")
                         self.current_goal = Point(x = goal_x, y = goal_y)
-                        #self.get_logger().info(f"Current goal: {self.current_goal}")
                         self.navigating_to_item = True  
                     else:
-                        self.get_logger().info(f"items not found, getting random coordinate...")
-                        self.current_goal = Point(x=random.uniform(self.min_x, self.max_x), y=random.uniform(self.min_y, self.max_y))
-                        self.get_logger().info(f"Goal: ({self.current_goal.x:.2f}, {self.current_goal.y:.2f})")
+                        random_goal_x = self.current_pose.pose.position.x + random.uniform(-5, 5)
+                        random_goal_y = self.current_pose.pose.position.y + random.uniform(-5, 5)
+                        self.current_goal = Point(x= random.uniform(self.min_x, self.max_x), y= random.uniform(self.min_y, self.max_y))
                 
                 #if holding an item, set goal to zone
                 #if no zones, spin
@@ -243,37 +238,31 @@ class RobotController(Node):
                     if len(self.zone_goals) == 0:
                         self.state = State.SPINNING
                         return
-                    self.get_logger().info(f"Setting goal to zone...")
                     self.current_goal = self.pick_zone()
                 
-
+                # if not(self.current_goal.x <= self.max_x and self.current_goal.x >= self.min_x) or not(self.current_goal.y <= self.max_y and self.current_goal.y >= self.min_y):
+                #     self.get_logger().info("goal out of bounds...")
+                #     self.navigator.spin(spin_dist=math.radians(45), time_allowance=10)
+                #     self.state = State.SPINNING
+                #     return
                 goal_pose = self.create_goal_pose(self.current_goal)
                 
-                #self.get_logger().info(f"Navigating to: ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f})")
-
                 self.navigator.goToPose(goal_pose)
                 self.state = State.NAVIGATING
-                
-                self.get_logger().info(f"Navigating...")
 
 
             case State.NAVIGATING:
                 #if not holding an item or navigating to and item, set goal to item
                 if not self.item_holder.holding_item and len(self.items.data) > 0 and not self.navigating_to_item:
                     if len(self.items.data) > 0:
-                        self.state = State.SET_GOAL
-                        self.get_logger().info(f"Setting goal...")
                         self.navigator.cancelTask()
                 if self.item_holder.holding_item and len(self.zones.data) > 0:
                     self.zone = self.zones.data[0]
-                else:
-                    self.zone = None
                 if not self.navigator.isTaskComplete():
 
                     feedback = self.navigator.getFeedback()
-                    #self.get_logger().info(f"Estimated time of arrival: {(Duration.from_msg(feedback.estimated_time_remaining).nanoseconds / 1e9):.0f} seconds")
 
-                    if Duration.from_msg(feedback.navigation_time) > Duration(seconds = 30):
+                    if Duration.from_msg(feedback.navigation_time) > Duration(seconds = 15):
                         self.get_logger().info(f"Navigation took too long... cancelling")
                         self.navigator.cancelTask()
 
@@ -289,13 +278,10 @@ class RobotController(Node):
                             #if not holding an item, pick up item
                             if self.navigating_to_item or self.item_holder.holding_item:
                                 self.state = State.ITEM_HANDLER
-                                self.get_logger().info(f"Item handler...")
                             else:
                                 #if not holding an item, set goal to item
                                 self.state = State.SET_GOAL
-                                self.get_logger().info(f"Setting goal...")
 
-                            #self.get_logger().info(f"Spinning")
 
                             #self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
                             #self.state = State.SPINNING
@@ -304,14 +290,12 @@ class RobotController(Node):
                             self.get_logger().info(f"Goal was canceled!")
                             
                             self.state = State.SET_GOAL
-                            self.get_logger().info(f"Setting goal...")
                             self.navigating_to_item = False
 
                         case TaskResult.FAILED:
                             self.get_logger().info(f"Goal failed!")
 
                             self.state = State.SET_GOAL
-                            self.get_logger().info(f"Setting goal...")
                             self.navigating_to_item = False
 
                         case _:
@@ -320,7 +304,7 @@ class RobotController(Node):
             case State.SPINNING:
                 if not self.navigator.isTaskComplete():
                     feedback = self.navigator.getFeedback()
-                   # self.get_logger().info(f"Turned: {math.degrees(feedback.angular_distance_traveled):.2f} degrees")
+                    self.get_logger().info(f"angle: {math.degrees(self.angle)}")
                 else:
 
                     result = self.navigator.getResult()
@@ -330,32 +314,28 @@ class RobotController(Node):
                         case TaskResult.SUCCEEDED:
                             self.get_logger().info(f"Spin completed!")
                             self.state = State.SET_GOAL
-                            self.get_logger().info(f"Setting goal...")
 
                         case TaskResult.CANCELED:
                             self.get_logger().info(f"Spin was canceled!")
 
                             self.state = State.SET_GOAL
-                            self.get_logger().info(f"Setting goal...")
 
                         case TaskResult.FAILED:
                             self.get_logger().info(f"Spin failed!")
 
                             self.state = State.SET_GOAL
-                            self.get_logger().info(f"Setting goal...")
 
                         case _:
                             self.get_logger().info(f"Spin has an invalid return status!")
 
             case State.ITEM_HANDLER:
+                self.get_logger().info(f"Item handler...")
                 #todo: save item held to add to data if successful
                 temp_item_data = self.item_holder
                 try:
                     if self.item_holder.holding_item:
-                        if self.zone != None:
-                            future = await self.offload_service.call_async(self.rqt)
-                        else:
-                            self.zone_goals.remove(self.current_goal)
+
+                        future = await self.offload_service.call_async(self.rqt)
                     else:
                         future = await self.pick_up_service.call_async(self.rqt)
     
@@ -367,37 +347,22 @@ class RobotController(Node):
                             self.item_retry_count += 1
                             return
                     elif response.success:
-                        self.get_logger().info(response.message) #Robot 'robot1' collected/offloaded item successfully
-                        self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
+                        self.get_logger().info(response.message)
+                        self.navigator.spin(spin_dist=self.get_angle_to_origin(), time_allowance=10)
                         self.state = State.SPINNING
-                        self.get_logger().info(f"Spinning...")
                         self.item_retry_count = 0
                         if not self.navigating_to_item:
                             self.update_item_zones(temp_item_data)
-                            self.zone_item_publisher.publish(self.item_zones)
+                            self.item_zones_publisher.publish(self.item_zones)
                         #self.items.data = []
                         self.navigating_to_item = False
                         return 
                     
                     self.get_logger().info(response.message)
+                    self.navigating_to_item =  False
                     self.state = State.SET_GOAL
-                    self.get_logger().info(f"Setting goal...")
                     self.item_retry_count = 0
 
-                    # if response is None and self.item_retry_count < 5:
-                    #     self.get_logger().info('No response received')
-                    #     self.item_retry_count += 1
-                    # elif response is not None and response.success:
-                    #     self.get_logger().info(response.message)
-                    #     self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
-                    #     self.state = State.SPINNING
-                    #     self.item_retry_count = 0
-                    #     self.items.data = []
-                    #     self.navigating_to_item = False
-                    # else:
-                    #     self.get_logger().info(response.message)
-                    #     self.state = State.SET_GOAL
-                    #     self.item_retry_count = 0
                 except Exception as e:
                     self.get_logger().info(f'Exception {e}')  
     
@@ -477,10 +442,15 @@ class RobotController(Node):
             if new_distance < shortest_distance:
                 closest_zone = zone
                 shortest_distance = new_distance  
-        #todo: store zones not just points so can be removed when items added
+            
         self.get_logger().info(f"closest zone: {closest_zone}")
         return closest_zone
+        #return self.zone_goals[random.randint(0, len(self.zone_goals) - 1)]  
     
+    def get_angle_to_origin(self):
+        theta = math.atan2(-self.current_pose.pose.position.y,-self.current_pose.pose.position.x)
+        return (theta - self.angle)
+              
     def update_item_zones(self, item_holder):
         for item_zone in self.item_zones.data:
             if item_zone.item_colour == item_holder.item_colour:
@@ -496,11 +466,6 @@ class RobotController(Node):
         
         #self.zone_goals.remove(Point(self.zone.x, self.zone.y))
 
-    def get_angle_to_origin(self, x, y):
-        theta = math.atan2(x,y)
-        self.get_logger().info(f"x,y: ({x:.2f},{y:.2f})")
-        self.get_logger().info(f"theta: ({theta:.2f})")
-        return (theta)
 
     def create_goal_pose(self, goal):
         goal_pose = PoseStamped()
@@ -508,12 +473,12 @@ class RobotController(Node):
         goal_pose.header.stamp = self.get_clock().now().to_msg()                
         goal_pose.pose.position = goal
 
-        angle = self.get_angle_to_origin(goal.x, goal.y)
+        angle = random.uniform(-180, 180)
 
         (goal_pose.pose.orientation.x,
          goal_pose.pose.orientation.y,
          goal_pose.pose.orientation.z,
-         goal_pose.pose.orientation.w) = (quaternion_from_euler(0, 0, float(0), axes='sxyz'))
+         goal_pose.pose.orientation.w) = quaternion_from_euler(0, 0, math.radians(angle), axes='sxyz')
 
         self.get_logger().info(f"Goal pose: {goal_pose}")
         return goal_pose
