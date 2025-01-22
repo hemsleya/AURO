@@ -13,12 +13,15 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
 from nav2_common.launch import RewrittenYaml, ReplaceString
-
+from launch.substitutions import LaunchConfiguration, TextSubstitution, PathJoinSubstitution
+from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     # Get the launch directory
+    package_name = 'assessment'
     bringup_dir = get_package_share_directory('nav2_bringup')
     launch_dir = os.path.join(bringup_dir, 'launch')
+    local_launch_dir = PathJoinSubstitution([FindPackageShare(package_name), 'launch'])
 
     # Create the launch configuration variables
     namespace = LaunchConfiguration('namespace')
@@ -117,7 +120,7 @@ def generate_launch_description():
                               'params_file': params_file}.items()),
 
         IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(os.path.join(launch_dir,
+            PythonLaunchDescriptionSource(PathJoinSubstitution(local_launch_dir,
                                                        'localization_launch.py')),
             condition=IfCondition(PythonExpression(['not ', slam])),
             launch_arguments={'namespace': namespace,

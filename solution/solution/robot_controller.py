@@ -133,6 +133,9 @@ class RobotController(Node):
     def odom_callback(self, msg):
         #self.get_logger().info(f"odom: ({msg.pose.pose.position.x:.2f}, {msg.pose.pose.position.y:.2f})")
         self.current_pose = msg.pose
+        #self.x = msg.pose.pose.position.x
+        #self.y = msg.pose.pose.position.y
+        self.get_logger().info(f"x,y:{msg.pose.pose.position.x, msg.pose.pose.position.y}")
         (_, _, self.angle) = euler_from_quaternion([msg.pose.pose.orientation.x,
                                                         msg.pose.pose.orientation.y,
                                                         msg.pose.pose.orientation.z,

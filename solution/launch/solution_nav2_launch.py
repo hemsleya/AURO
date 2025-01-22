@@ -13,7 +13,6 @@ from launch_ros.actions import Node, SetParameter, SetRemap, PushRosNamespace, R
 def robot_controller_actions(context : LaunchContext):
 
     num_robots = int(context.launch_configurations['num_robots'])
-        
     yaml_path = os.path.join(get_package_share_directory('assessment'), 'config', 'initial_poses.yaml')
 
     with open(yaml_path, 'r') as f:
@@ -32,6 +31,10 @@ def robot_controller_actions(context : LaunchContext):
             PushRosNamespace(robot_name),
             SetRemap('/tf', 'tf'),
             SetRemap('/tf_static', 'tf_static'),
+            SetRemap('map_server', '/map_server'),
+            SetRemap('map_updates', '/map_updates'),
+            SetRemap('map', '/map'),
+            SetRemap('/scan', 'scan'),
 
             Node(
                 package='solution',
@@ -90,14 +93,21 @@ def generate_launch_description():
         'data_log_filename',
         default_value='data_log',
         description='Filename prefix to use for data logs')
+    
 
     rviz_config = PathJoinSubstitution([FindPackageShare('assessment'), 'rviz', 'namespaced_nav2.rviz'])
     rviz_windows = PathJoinSubstitution([FindPackageShare('assessment'), 'config', 'rviz_windows.yaml'])
     # rviz_windows = PathJoinSubstitution([FindPackageShare(package_name), 'config', 'custom_rviz_windows.yaml'])
     map = PathJoinSubstitution([FindPackageShare('assessment'), 'maps', 'assessment_world.yaml'])
-    params = PathJoinSubstitution([FindPackageShare('assessment'), 'params', 'nav2_params_namespaced.yaml'])
-    # params = PathJoinSubstitution([FindPackageShare(package_name), 'params', 'custom_nav2_params_namespaced.yaml'])
+    #params = PathJoinSubstitution([FindPackageShare('assessment'), 'params', 'nav2_params_namespaced.yaml'])
+    params = PathJoinSubstitution([FindPackageShare(package_name), 'params', 'custom_nav2_params_namespaced.yaml'])
 
+
+    # declare_map_server_cmd = DeclareLaunchArgument(
+    #     '/map_server',
+    #     default_value=map,
+    #     description='Map server yaml')
+    
     assessment_cmd = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
@@ -109,8 +119,6 @@ def generate_launch_description():
         launch_arguments={'num_robots': num_robots,
                           'visualise_sensors': 'false',
                           'odometry_source': 'ENCODER',
-                          'sensor_noise': 'false',
-                          'use_rviz': 'true',
                           'rviz_config': rviz_config,
                           'rviz_windows': rviz_windows,
                           'obstacles': 'true',
