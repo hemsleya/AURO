@@ -65,6 +65,11 @@ def generate_launch_description():
     data_log_path = LaunchConfiguration('data_log_path')
     data_log_filename = LaunchConfiguration('data_log_filename')
 
+    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+    declare_use_sim_time = DeclareLaunchArgument(
+        name='use_sim_time', default_value=use_sim_time, description='Use simulator time'
+    )
+
     declare_num_robots_cmd = DeclareLaunchArgument(
         'num_robots',
         default_value='1',
@@ -99,10 +104,25 @@ def generate_launch_description():
     params = PathJoinSubstitution([FindPackageShare(package_name), 'params', 'custom_nav2_params_namespaced.yaml'])
 
 
-    # declare_map_server_cmd = DeclareLaunchArgument(
-    #     '/map_server',
-    #     default_value=map,
-    #     description='Map server yaml')
+    remappings = [('/tf', 'tf'),
+                  ('/tf_static', 'tf_static')]
+    
+    #launch global map_server so all robots share 1 map
+    map_server=Node(package='nav2_map_server',
+        executable='map_server',
+        name='map_server',
+        output='screen',
+        parameters=[{'yaml_filename': os.path.join(get_package_share_directory('turtlebot3_navigation2'), 'map', 'map.yaml'),
+                     },],
+        remappings=remappings)
+
+    map_server_lifecyle=Node(package='nav2_lifecycle_manager',
+            executable='lifecycle_manager',
+            name='lifecycle_manager_map_server',
+            output='screen',
+            parameters=[{'use_sim_time': use_sim_time},
+                        {'autostart': True},
+                        {'node_names': ['map_server']}])
     
     assessment_cmd = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -149,7 +169,7 @@ def generate_launch_description():
 
     ld = LaunchDescription()
 
-    ld.add_action(SetParameter(name='use_sim_time', value=True))
+    ld.add_action(declare_use_sim_time)
 
     ld.add_action(declare_num_robots_cmd)
     ld.add_action(declare_random_seed_cmd)
@@ -161,5 +181,9 @@ def generate_launch_description():
     ld.add_action(robot_controller_cmd)
     ld.add_action(data_logger_cmd)
     ld.add_action(timeout_cmd)
+
+    ld.add_action(map_server)
+    ld.add_action(map_server_lifecyle)
+
 
     return ld
