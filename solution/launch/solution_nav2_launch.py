@@ -31,10 +31,6 @@ def robot_controller_actions(context : LaunchContext):
             PushRosNamespace(robot_name),
             SetRemap('/tf', 'tf'),
             SetRemap('/tf_static', 'tf_static'),
-            SetRemap('map_server', '/map_server'),
-            SetRemap('map_updates', '/map_updates'),
-            SetRemap('map', '/map'),
-            SetRemap('/scan', 'scan'),
 
             Node(
                 package='solution',
