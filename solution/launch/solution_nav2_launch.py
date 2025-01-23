@@ -142,6 +142,7 @@ def generate_launch_description():
                           'random_seed': random_seed,
                           'use_nav2': 'True',
                           'map': map,
+                          'map_server': 'False',
                           'params_file': params,
                           'headless': 'false',
                           'limit_real_time_factor': 'true',

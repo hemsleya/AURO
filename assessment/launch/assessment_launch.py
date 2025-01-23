@@ -154,6 +154,7 @@ def group_action(context : LaunchContext):
 
     bringup_cmd_group = []
 
+    print(f"assessment map_server argument: {context.launch_configurations['map_server']}")
     for robot_name, init_pose in initial_poses.items():
         group = GroupAction([
 
@@ -172,13 +173,13 @@ def group_action(context : LaunchContext):
                                   'window_y': str(rviz_windows[robot_name]['window_y']),
                                   'window_width': str(rviz_windows[robot_name]['window_width']),
                                   'window_height': str(rviz_windows[robot_name]['window_height'])}.items()),
-
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(PathJoinSubstitution([
                     launch_file_dir,
                     'spawn_robot_launch.py'])),
                 launch_arguments={'use_nav2': context.launch_configurations['use_nav2'],
                                   'map': context.launch_configurations['map'],
+                                  'map_server': context.launch_configurations['map_server'],
                                   'params_file': context.launch_configurations['params_file'],
                                   'x_pose': TextSubstitution(text=str(init_pose['x'])),
                                   'y_pose': TextSubstitution(text=str(init_pose['y'])),
@@ -216,6 +217,7 @@ def generate_launch_description():
     random_seed = LaunchConfiguration('random_seed')
     use_nav2 = LaunchConfiguration('use_nav2')
     map_yaml_file = LaunchConfiguration('map')
+    map_server = LaunchConfiguration('map_server')
     params_file = LaunchConfiguration('params_file')
     headless = LaunchConfiguration('headless')
     limit_real_time_factor = LaunchConfiguration('limit_real_time_factor')

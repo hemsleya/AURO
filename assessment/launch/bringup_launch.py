@@ -27,6 +27,7 @@ def generate_launch_description():
     namespace = LaunchConfiguration('namespace')
     slam = LaunchConfiguration('slam')
     map_yaml_file = LaunchConfiguration('map')
+    map_server=LaunchConfiguration('map_server')
     use_sim_time = LaunchConfiguration('use_sim_time')
     params_file = LaunchConfiguration('params_file')
     autostart = LaunchConfiguration('autostart')
@@ -45,7 +46,7 @@ def generate_launch_description():
     # User defined config file should contain '<robot_namespace>' keyword for the replacements.
     params_file = ReplaceString(
         source_file=params_file,
-        replacements={'<robot_namespace>': ('/', namespace)})
+        replacements={'<robot_namespace>': (namespace)})
 
     configured_params = ParameterFile(
         RewrittenYaml(
@@ -71,6 +72,11 @@ def generate_launch_description():
     declare_map_yaml_cmd = DeclareLaunchArgument(
         'map',
         description='Full path to map yaml file to load')
+    
+    declare_map_server_cmd = DeclareLaunchArgument(
+            'map_server',
+            default_value='False',
+            description='Whether run a map server per nav2 stack')
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time',
@@ -98,6 +104,8 @@ def generate_launch_description():
         'log_level', default_value='info',
         description='log level')
 
+    print(f"bringup map_server: {map_server}")
+    print(f"bringup map_yaml: {map_yaml_file}")
     # Specify the actions
     bringup_cmd_group = GroupAction([
 
@@ -118,13 +126,13 @@ def generate_launch_description():
                               'autostart': autostart,
                               'use_respawn': use_respawn,
                               'params_file': params_file}.items()),
-
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([local_launch_dir,
                                                        'localization_launch.py'])),
             condition=IfCondition(PythonExpression(['not ', slam])),
             launch_arguments={'namespace': namespace,
                               'map': map_yaml_file,
+                              'map_server': map_server,
                               'use_sim_time': use_sim_time,
                               'autostart': autostart,
                               'params_file': params_file,
@@ -153,6 +161,7 @@ def generate_launch_description():
     ld.add_action(declare_namespace_cmd)
     ld.add_action(declare_slam_cmd)
     ld.add_action(declare_map_yaml_cmd)
+    ld.add_action(declare_map_server_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_params_file_cmd)
     ld.add_action(declare_autostart_cmd)

@@ -55,13 +55,14 @@ def bringup_actions(context : LaunchContext):
             '-R', context.launch_configurations['roll'],
             '-P', context.launch_configurations['pitch'],
             '-Y', context.launch_configurations['yaw']])
-    
+    print(f"spawn_robot map_server: {context.launch_configurations['map_server']}")
     bringup_cmd = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(launch_dir, 'bringup_launch.py')),
         condition=IfCondition(context.launch_configurations['use_nav2']),
         launch_arguments={'namespace': robot_name,
                           'map': context.launch_configurations['map'],
+                          'map_server': context.launch_configurations['map_server'],
                           'use_sim_time': 'True',
                           'params_file': context.launch_configurations['params_file'],
                           'autostart': 'True',
