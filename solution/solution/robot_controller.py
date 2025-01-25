@@ -48,7 +48,7 @@ class RobotController(Node):
         self.min_y = -2.5
         self.max_y = 2.5
 
-        self.state = State.NAVIGATING
+        self.state = State.SPINNING
         self.items = ItemList()
         self.zones = ZoneList()
         self.robots = RobotList()
@@ -133,9 +133,6 @@ class RobotController(Node):
     def odom_callback(self, msg):
         #self.get_logger().info(f"odom: ({msg.pose.pose.position.x:.2f}, {msg.pose.pose.position.y:.2f})")
         self.current_pose = msg.pose
-        #self.x = msg.pose.pose.position.x
-        #self.y = msg.pose.pose.position.y
-        self.get_logger().info(f"x,y:{msg.pose.pose.position.x, msg.pose.pose.position.y}")
         (_, _, self.angle) = euler_from_quaternion([msg.pose.pose.orientation.x,
                                                         msg.pose.pose.orientation.y,
                                                         msg.pose.pose.orientation.z,
@@ -177,8 +174,7 @@ class RobotController(Node):
 
     async def control_loop(self):
         if self.first_run:
-            #self.navigator.spin(spin_dist=math.radians(360), time_allowance=10)
-            self.navigator.goToPose(self.create_goal_pose(Point(x=0.0, y=0.0)))
+            self.navigator.spin(spin_dist=math.radians(360), time_allowance=10)
             self.first_run = False
         try:
             t = self.tf_buffer.lookup_transform(
@@ -220,16 +216,15 @@ class RobotController(Node):
                 if not self.item_holder.holding_item:
                     if len(self.items.data) > 0:
                         item = self.items.data[0]
-                        theta = math.atan2(item.x, item.y)
-                        estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
-                        goal_x = self.current_pose.pose.position.x + (estimated_distance * math.sin(theta+self.angle))
-                        goal_y = self.current_pose.pose.position.y + (estimated_distance * math.cos(theta+self.angle))
-                        #self.get_logger().info(f"sin: {math.sin(theta):.2f}, cos: {math.cos(theta):.2f}")
-                        # self.get_logger().info(f"Estimated distance: {estimated_distance:.2f}")
-                        self.get_logger().info(f"Goal: ({goal_x:.2f}, {goal_y:.2f})")
-                        # self.get_logger().info(f"Self: ({self.x:.2f}, {self.y:.2f})")
-                        self.current_goal = Point(x = goal_x, y = goal_y)
-                        #self.get_logger().info(f"Current goal: {self.current_goal}")
+
+                        x = self.current_pose.pose.position.x
+                        y = self.current_pose.pose.position.y
+                        theta = self.current_pose.pose.orientation.z
+                        item_global_x = x + (item.x * math.cos(theta) - item.y * math.sin(theta) )
+                        item_global_y = y + (item.y * math.sin(theta) + item.x * math.cos(theta) )
+
+                        self.get_logger().info(f"Goal: ({item_global_x:.2f}, {item_global_y:.2f})")
+                        self.current_goal = Point(x = item_global_x, y = item_global_y)
                         self.navigating_to_item = True  
                     else:
                         self.get_logger().info(f"items not found, getting random coordinate...")
@@ -271,8 +266,11 @@ class RobotController(Node):
 
                     feedback = self.navigator.getFeedback()
                     #self.get_logger().info(f"Estimated time of arrival: {(Duration.from_msg(feedback.estimated_time_remaining).nanoseconds / 1e9):.0f} seconds")
-                    self.get_logger().info(f"Feedback: {feedback}")
-                    if feedback.num_of_recoveries > 3:
+                    #self.get_logger().info(f"Feedback: {feedback}")
+                    self.get_logger().info(f"Feedback: {feedback.number_of_recoveries}")
+                    
+
+                    if feedback.number_of_recoveries > 3:
                         self.get_logger().info(f"Recovery failed... cancelling ... spinning")
                         self.navigator.cancelTask()
                         self.navigator.clearLocalCostmap()
