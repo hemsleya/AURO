@@ -48,7 +48,7 @@ class RobotController(Node):
         self.min_y = -2.5
         self.max_y = 2.5
 
-        self.state = State.SPINNING
+        self.state = State.NAVIGATING
         self.items = ItemList()
         self.zones = ZoneList()
         self.robots = RobotList()
@@ -177,7 +177,8 @@ class RobotController(Node):
 
     async def control_loop(self):
         if self.first_run:
-            self.navigator.spin(spin_dist=math.radians(360), time_allowance=10)
+            #self.navigator.spin(spin_dist=math.radians(360), time_allowance=10)
+            self.navigator.goToPose(self.create_goal_pose(Point(x=0.0, y=0.0)))
             self.first_run = False
         try:
             t = self.tf_buffer.lookup_transform(
@@ -218,16 +219,11 @@ class RobotController(Node):
                 #self.get_logger().info(f"holding_item: {self.item_holder.holding_item}")
                 if not self.item_holder.holding_item:
                     if len(self.items.data) > 0:
-                        self.get_logger().info(f"items found, setting goal...")
-                        self.get_logger().info(f"items: {self.items}")
                         item = self.items.data[0]
-                        self.get_logger().info(f"Item: {item}")
                         theta = math.atan2(item.x, item.y)
-                        self.get_logger().info(f"Theta: {math.degrees(theta):.2f}")
-                        self.get_logger().info(f"current angle: {math.degrees(self.angle)}")
                         estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
-                        goal_x = self.current_pose.pose.position.x + (estimated_distance * math.cos(theta+self.angle))
-                        goal_y = self.current_pose.pose.position.y + (estimated_distance * math.sin(theta+self.angle))
+                        goal_x = self.current_pose.pose.position.x + (estimated_distance * math.sin(theta+self.angle))
+                        goal_y = self.current_pose.pose.position.y + (estimated_distance * math.cos(theta+self.angle))
                         #self.get_logger().info(f"sin: {math.sin(theta):.2f}, cos: {math.cos(theta):.2f}")
                         # self.get_logger().info(f"Estimated distance: {estimated_distance:.2f}")
                         self.get_logger().info(f"Goal: ({goal_x:.2f}, {goal_y:.2f})")
@@ -275,8 +271,16 @@ class RobotController(Node):
 
                     feedback = self.navigator.getFeedback()
                     #self.get_logger().info(f"Estimated time of arrival: {(Duration.from_msg(feedback.estimated_time_remaining).nanoseconds / 1e9):.0f} seconds")
-
-                    if Duration.from_msg(feedback.navigation_time) > Duration(seconds = 30):
+                    self.get_logger().info(f"Feedback: {feedback}")
+                    if feedback.num_of_recoveries > 3:
+                        self.get_logger().info(f"Recovery failed... cancelling ... spinning")
+                        self.navigator.cancelTask()
+                        self.navigator.clearLocalCostmap()
+                        self.navigator.spin(spin_dist=math.radians(360), time_allowance=10)
+                        self.state = State.SPINNING
+                        return
+                        
+                    if Duration.from_msg(feedback.navigation_time) > Duration(seconds = 15):
                         self.get_logger().info(f"Navigation took too long... cancelling")
                         self.navigator.cancelTask()
 

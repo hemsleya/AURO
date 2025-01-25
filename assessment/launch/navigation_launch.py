@@ -196,6 +196,15 @@ def generate_launch_description():
                 parameters=[{'use_sim_time': use_sim_time},
                             {'autostart': autostart},
                             {'node_names': lifecycle_nodes}]),
+            # Node(
+            #     package='nav2_collision_monitor',
+            #     executable='collision_monitor',
+            #     output='screen',
+            #     respawn=use_respawn,
+            #     respawn_delay=2.0,
+            #     parameters=[configured_params],
+            #     arguments=['--ros-args', '--log-level', log_level],
+            #     remappings=remappings + [('cmd_vel', 'cmd_vel_nav')]),
         ]
     )
 
@@ -253,6 +262,12 @@ def generate_launch_description():
                 parameters=[{'use_sim_time': use_sim_time,
                              'autostart': autostart,
                              'node_names': lifecycle_nodes}]),
+            # ComposableNode(
+            #     package='nav2_collision_monitor',
+            #     plugin='nav2_collision_monitor::CollisionMonitor',
+            #     name='collision_monitor',
+            #     parameters=[configured_params],
+            #     remappings=remappings + [('cmd_vel', 'cmd_vel_nav')]),
         ],
     )
 

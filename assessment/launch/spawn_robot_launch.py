@@ -55,7 +55,7 @@ def bringup_actions(context : LaunchContext):
             '-R', context.launch_configurations['roll'],
             '-P', context.launch_configurations['pitch'],
             '-Y', context.launch_configurations['yaw']])
-    print(f"spawn_robot map_server: {context.launch_configurations['map_server']}")
+
     bringup_cmd = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(launch_dir, 'bringup_launch.py')),
