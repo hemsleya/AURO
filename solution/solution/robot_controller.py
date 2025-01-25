@@ -35,6 +35,7 @@ class State(Enum):
     NAVIGATING = 1
     SPINNING = 2
     ITEM_HANDLER = 3
+    RECOVERING = 4
 
 
     
@@ -215,13 +216,20 @@ class RobotController(Node):
                 #self.get_logger().info(f"holding_item: {self.item_holder.holding_item}")
                 if not self.item_holder.holding_item:
                     if len(self.items.data) > 0:
+                        self.get_logger().info(f"Items: {self.items.data}")
                         item = self.items.data[0]
+                        self.get_logger().info(f"Item: {self.items.data[0]}")
+                        estimated_distance = 32.4 * float(item.diameter) ** -0.75 #69.0 * float(item.diameter) ** -0.89
 
                         x = self.current_pose.pose.position.x
                         y = self.current_pose.pose.position.y
-                        theta = self.current_pose.pose.orientation.z
-                        item_global_x = x + (item.x * math.cos(theta) - item.y * math.sin(theta) )
-                        item_global_y = y + (item.y * math.sin(theta) + item.x * math.cos(theta) )
+                        orientation = self.current_pose.pose.orientation
+                        (_, _, theta) = euler_from_quaternion([orientation.x, orientation.y, orientation.z, orientation.w])
+
+                        direction_angle = math.atan2(item.y, item.x)
+                        
+                        item_global_x = x - (estimated_distance * math.cos(theta + direction_angle) )
+                        item_global_y = y + (estimated_distance * math.sin(theta + direction_angle) )
 
                         self.get_logger().info(f"Goal: ({item_global_x:.2f}, {item_global_y:.2f})")
                         self.current_goal = Point(x = item_global_x, y = item_global_y)
@@ -253,7 +261,7 @@ class RobotController(Node):
 
             case State.NAVIGATING:
                 #if not holding an item or navigating to and item, set goal to item
-                if not self.item_holder.holding_item and len(self.items.data) > 0 and not self.navigating_to_item:
+                if self.should_redirect_to_item():
                     if len(self.items.data) > 0:
                         self.state = State.SET_GOAL
                         self.get_logger().info(f"Setting goal...")
@@ -265,12 +273,9 @@ class RobotController(Node):
                 if not self.navigator.isTaskComplete():
 
                     feedback = self.navigator.getFeedback()
-                    #self.get_logger().info(f"Estimated time of arrival: {(Duration.from_msg(feedback.estimated_time_remaining).nanoseconds / 1e9):.0f} seconds")
-                    #self.get_logger().info(f"Feedback: {feedback}")
-                    self.get_logger().info(f"Feedback: {feedback.number_of_recoveries}")
                     
 
-                    if feedback.number_of_recoveries > 3:
+                    if feedback.number_of_recoveries > 5:
                         self.get_logger().info(f"Recovery failed... cancelling ... spinning")
                         self.navigator.cancelTask()
                         self.navigator.clearLocalCostmap()
@@ -300,10 +305,6 @@ class RobotController(Node):
                                 self.state = State.SET_GOAL
                                 self.get_logger().info(f"Setting goal...")
 
-                            #self.get_logger().info(f"Spinning")
-
-                            #self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
-                            #self.state = State.SPINNING
 
                         case TaskResult.CANCELED:
                             self.get_logger().info(f"Goal was canceled!")
@@ -326,6 +327,10 @@ class RobotController(Node):
                 if not self.navigator.isTaskComplete():
                     feedback = self.navigator.getFeedback()
                    # self.get_logger().info(f"Turned: {math.degrees(feedback.angular_distance_traveled):.2f} degrees")
+                    if self.should_redirect_to_item():
+                        self.get_logger().info(f"Setting goal...")
+                        self.state = State.SET_GOAL
+                        self.navigator.cancelTask()
                 else:
 
                     result = self.navigator.getResult()
@@ -372,7 +377,7 @@ class RobotController(Node):
                             self.item_retry_count += 1
                             return
                     elif response.success:
-                        self.get_logger().info(response.message) #Robot 'robot1' collected/offloaded item successfully
+                        self.get_logger().info("Item Handler response: {response.message}") #Robot 'robot1' collected/offloaded item successfully
                         self.navigator.spin(spin_dist=math.radians(180), time_allowance=10)
                         self.state = State.SPINNING
                         self.get_logger().info(f"Spinning...")
@@ -384,10 +389,11 @@ class RobotController(Node):
                         self.navigating_to_item = False
                         return 
                     
-                    self.get_logger().info(response.message)
+                    self.get_logger().info(f"Item Handler response: {response.message}")
                     self.state = State.SET_GOAL
                     self.get_logger().info(f"Setting goal...")
                     self.item_retry_count = 0
+                    self.navigating_to_item = False
 
                     # if response is None and self.item_retry_count < 5:
                     #     self.get_logger().info('No response received')
@@ -523,6 +529,9 @@ class RobotController(Node):
         self.get_logger().info(f"Goal pose: {goal_pose}")
         return goal_pose
    
+    def should_redirect_to_item(self):
+        return (not self.item_holder.holding_item and len(self.items.data) > 0 and not self.navigating_to_item)
+
     def destroy_node(self):
         self.get_logger().info(f"Shutting down")
         self.navigator.lifecycleShutdown()
