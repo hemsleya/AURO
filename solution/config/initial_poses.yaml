@@ -23,12 +23,12 @@
 # Two robots
 2:
   robot1:
-    x:  -3.5
-    y:   1.0
+    x:   2.5
+    y:   2.0
     yaw: 0.0
   robot2:
-    x:  -3.5
-    y:  -1.0
+    x:   0.0
+    y:   0.0
     yaw: 0.0
 
 # Three robots
@@ -38,10 +38,10 @@
     y:   2.0
     yaw: 0.0
   robot2:
-    x:  -3.5
+    x:   2.5
     y:   0.0
     yaw: 0.0
   robot3:
-    x:  -3.5
+    x:   0.0
     y:  -2.0
     yaw: 0.0

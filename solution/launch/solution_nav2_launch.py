@@ -13,7 +13,7 @@ from launch_ros.actions import Node, SetParameter, SetRemap, PushRosNamespace, R
 def robot_controller_actions(context : LaunchContext):
 
     num_robots = int(context.launch_configurations['num_robots'])
-    yaml_path = os.path.join(get_package_share_directory('assessment'), 'config', 'initial_poses.yaml')
+    yaml_path = os.path.join(get_package_share_directory(context.launch_configurations['initial_pose_package']), 'config', 'initial_poses.yaml')
 
     with open(yaml_path, 'r') as f:
         configuration = yaml.safe_load(f)
@@ -60,6 +60,12 @@ def generate_launch_description():
     package_name = 'solution'
 
     num_robots = LaunchConfiguration('num_robots')
+    headless = LaunchConfiguration('headless')
+    obstacles = LaunchConfiguration('obstacles')
+    zone_top_left = LaunchConfiguration('zone_top_left')
+    sensor_noise = LaunchConfiguration('sensor_noise')
+    initial_pose_package = LaunchConfiguration('initial_pose_package')
+    initial_pose_file = LaunchConfiguration('initial_pose_file')
     random_seed = LaunchConfiguration('random_seed')
     experiment_duration = LaunchConfiguration('experiment_duration')
     data_log_path = LaunchConfiguration('data_log_path')
@@ -74,6 +80,36 @@ def generate_launch_description():
         'num_robots',
         default_value='1',
         description='Number of robots to spawn')
+    
+    declare_headless_cmd = DeclareLaunchArgument(
+        'headless',
+        default_value='False',
+        description='Run simulation in headless mode')
+    
+    declare_obstacles_cmd = DeclareLaunchArgument(
+        'obstacles',
+        default_value='True',
+        description='Run simulation without obstacles')
+    
+    declare_zone_top_left_cmd = DeclareLaunchArgument(
+        'zone_top_left',
+        default_value='True',
+        description='Activate zone top left')
+    
+    declare_sensor_noise_cmd = DeclareLaunchArgument(
+        'sensor_noise',
+        default_value='False',
+        description='Run simulation with sensor noise')
+    
+    declare_initial_pose_package_cmd = DeclareLaunchArgument(
+        'initial_pose_package',
+        default_value='assessment',
+        description='Set package name for initial pose file')
+    
+    declare_initial_pose_file_cmd = DeclareLaunchArgument(
+        'initial_pose_file',
+        default_value='config/initial_poses.yaml',
+        description='Set filename for initial pose file')
     
     declare_random_seed_cmd = DeclareLaunchArgument(
         'random_seed',
@@ -137,16 +173,20 @@ def generate_launch_description():
                           'odometry_source': 'ENCODER',
                           'rviz_config': rviz_config,
                           'rviz_windows': rviz_windows,
-                          'obstacles': 'true',
+                          'obstacles': obstacles,
+                          'zone_top_left': zone_top_left,
                           'item_manager': 'true',
                           'random_seed': random_seed,
                           'use_nav2': 'True',
                           'map': map,
                           'map_server': 'False',
                           'params_file': params,
-                          'headless': 'false',
+                          'headless': headless,
                           'limit_real_time_factor': 'true',
                           'wait_for_items': 'false',
+                          'sensor_noise': sensor_noise,
+                          'initial_pose_package': initial_pose_package,
+                          'initial_pose_file': initial_pose_file,
                           # 'extra_gazebo_args': '--verbose',
                           }.items()
     )
@@ -173,6 +213,12 @@ def generate_launch_description():
     ld.add_action(declare_use_sim_time)
 
     ld.add_action(declare_num_robots_cmd)
+    ld.add_action(declare_headless_cmd)
+    ld.add_action(declare_obstacles_cmd)
+    ld.add_action(declare_zone_top_left_cmd)
+    ld.add_action(declare_sensor_noise_cmd)
+    ld.add_action(declare_initial_pose_package_cmd)
+    ld.add_action(declare_initial_pose_file_cmd)
     ld.add_action(declare_random_seed_cmd)
     ld.add_action(declare_experiment_duration_cmd)
     ld.add_action(declare_data_log_path_cmd)

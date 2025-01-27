@@ -151,6 +151,7 @@ class RobotController(Node):
 
     def item_callback(self, msg):
         self.items = msg
+        self.sortItems()
     
     def zone_callback(self, msg):
         self.zones = msg
@@ -275,7 +276,7 @@ class RobotController(Node):
                     feedback = self.navigator.getFeedback()
                     
 
-                    if feedback.number_of_recoveries > 5:
+                    if feedback.number_of_recoveries > 8:
                         self.get_logger().info(f"Recovery failed... cancelling ... spinning")
                         self.navigator.cancelTask()
                         self.navigator.clearLocalCostmap()
@@ -461,7 +462,7 @@ class RobotController(Node):
         self.item__zones_subscriber = self.create_subscription(
             ItemZones,
             '/item_zones',
-            self.item_callback,
+            self.item_zones_callback,
             10, callback_group=subscriber_callback_group
         )
 
@@ -512,6 +513,19 @@ class RobotController(Node):
         self.get_logger().info(f"x,y: ({x:.2f},{y:.2f})")
         self.get_logger().info(f"theta: ({theta:.2f})")
         return (theta)
+
+    def sortItems(self):
+        self.items.data.sort(key=self.getSortKey, reverse=True)
+    
+    #sort items so that robot 1 goes to the closest (usually red), robot 2 goes to the most valuable (usually blue) and robot 3 goes to the longest colour (usually green)
+    def getSortKey(self, item:Item):
+        match self.robot_id:
+            case 'robot1':
+                return item.diameter
+            case 'robot2':
+                return item.value
+            case 'robot3':
+                return len(item.colour)
 
     def create_goal_pose(self, goal):
         goal_pose = PoseStamped()

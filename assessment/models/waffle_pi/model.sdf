@@ -118,7 +118,8 @@
         <pose>-0.052 0 0.111 0 0 0</pose>
         <geometry>
           <cylinder>
-            <radius>0.0508</radius>
+            <radius>0.1~/auro$ rqt_graph
+QStandardPaths: wrong permissions on runtime directory /run/user/1000/, 0755 instead of 070000</radius>
             <length>0.055</length>
           </cylinder>
         </geometry>
